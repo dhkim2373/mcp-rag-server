@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>원문 상세조회 및 재임베딩 - {{ ref_num }}</title>
+    <!-- 구글 폰트 Noto Sans KR 추가 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    
+    <style>
+        /* 제미나이풍의 또렷하고 깔끔한 서체 및 기본 스타일 정의 */
+        body {
+            font-family: "Noto Sans KR", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        /* 편집창(textarea) 전용 고가독성 스타일 */
+        .custom-textarea {
+            font-family: "Noto Sans KR", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+            font-size: 15px !important;
+            line-height: 1.65 !important;
+            font-weight: 400;
+            letter-spacing: -0.02em; /* 자간을 미세하게 좁혀 또렷하게 조절 */
+            color: #202124;
+            padding: 18px !important;
+            border: 1px solid #dadce0 !important;
+            background-color: #ffffff !important; /* 글씨가 더 잘 보이도록 백그라운드 화이트 변경 */
+            transition: border-color 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+            resize: vertical;
+        }
+
+        /* 편집창 포커스 시 부드러운 블루 보더 효과 */
+        .custom-textarea:focus {
+            border-color: #1a73e8 !important;
+            box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.15) !important;
+            outline: none;
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <div class="container mt-5" style="max-width: 850px;">
+        <div class="card shadow p-4 bg-white rounded-3 border-0">
+            <div class="d-flex justify-content-between align-items-center border-bottom pb-3 mb-4">
+                <div>
+                    <h3 class="m-0 text-dark fw-bold" style="letter-spacing: -0.03em;">📄 지식 저장소 원천 데이터 수정</h3>
+                    <small class="text-muted">실시간 계측 일시: {{ current_time }}</small>
+                </div>
+                <span class="badge bg-primary fs-6 px-3 py-2" style="font-family: monospace;">{{ ref_num }}</span>
+            </div>
+
+            <!-- 수정 폼 전송 파이프라인 -->
+            <form action="/view/document/{{ ref_num }}/save" method="POST">
+                <!-- 🎯 고유 청크 키 및 model_id 폼 전송 데이터 정의 -->
+                <input type="hidden" name="chunk_id" value="{{ chunk_id }}">
+                <input type="hidden" name="model_id" value="{{ model_id }}">
+                
+                <div class="mb-4">
+                    <label class="form-label fw-bold text-secondary mb-2">원문 지식 텍스트 편집</label>
+                    <!-- spellcheck="false" 추가로 빨간 밑줄 방지, 클래스 적용 -->
+                    <textarea name="content" 
+                              class="form-control custom-textarea" 
+                              rows="14" 
+                              spellcheck="false" 
+                              required>{{ content }}</textarea>
+                    <div class="form-text mt-2 text-muted">💡 저장 시 고유 청크 키를 기반으로 정밀 재임베딩 및 팩트 갱신이 안전하게 수행됩니다.</div>
+                </div>
+
+                <div class="d-flex justify-content-end gap-2">
+                    <!-- 🎯 목록으로 돌아가기 버튼 클릭 시 model_id 쿼리 파라미터 바인딩 -->
+                    <a href="/view/list?model_id={{ model_id }}" class="btn btn-outline-secondary px-4">목록으로 돌아가기</a>
+                    <button type="submit" class="btn btn-success px-5 fw-bold">편집 내용 저장 및 재임베딩</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</body>
+</html>

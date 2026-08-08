@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>3PL 지식보관소 관리 어드민</title>
+    <!-- 구글 폰트 Noto Sans KR 추가 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+    <!-- 부트스트랩 5 CDN 도입 -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    
+    <style>
+        /* 깔끔하고 또렷한 본문용 서체 및 기본 스타일 정의 */
+        body {
+            font-family: "Noto Sans KR", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            color: #202124;
+        }
+
+        /* 입력 폼(검색바, 날짜, 셀렉트 박스 등) 통합 선명도 및 가독성 개선 */
+        .form-control, .form-select {
+            font-family: "Noto Sans KR", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+            font-size: 14px !important;
+            letter-spacing: -0.01em;
+            border: 1px solid #dadce0 !important;
+            transition: border-color 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+        }
+
+        /* 폼 요소 포커스 시 부드러운 블루 효과 */
+        .form-control:focus, .form-select:focus {
+            border-color: #1a73e8 !important;
+            box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.15) !important;
+            outline: none;
+        }
+
+        /* 테이블 공간 최적화 및 가독성 향상 스타일 */
+        .table {
+            font-size: 14px;
+            letter-spacing: -0.01em;
+            table-layout: fixed; /* 💡 컬럼 폭 강제 지정 활성화 */
+            width: 100%;
+        }
+        
+        .table th {
+            font-weight: 500;
+            background-color: #1f2937 !important; /* 부드러운 다크 톤 헤더 */
+        }
+
+        .table td {
+            color: #3c4043;
+            padding-top: 12px !important;
+            padding-bottom: 12px !important;
+            word-break: break-all; /* 💡 텍스트가 삐져나가지 않고 자연스럽게 줄바꿈되도록 처리 */
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <div class="container mt-5" style="max-width: 950px;"> <!-- 테이블 가독성을 위해 max-width 살짝 확장 -->
+        <div class="card shadow-sm p-4 bg-white rounded-3 border-0">
+            <h2 class="mb-4 text-primary fw-bold" style="letter-spacing: -0.02em;">🔍 RAG 지식 저장소 문서 관리</h2>
+            
+            <!-- 조회 및 필터 영역 -->
+            <form action="/view/list" method="GET" class="mb-4">
+                <!-- 🎯 1행: model_id 선택 드롭다운 및 데이터 실시간 조회 버튼 -->
+                <div class="row g-3 align-items-end mb-3">
+                    <div class="col-md-8">
+                        <label class="form-label fw-bold text-secondary">지식 저장소 모델 선택 (model_id)</label>
+                        <select name="model_id" class="form-select py-2 fw-bold text-primary" required>
+                            <option value="3PL지식저장소" {% if selected_model_id == "3PL지식저장소" %}selected{% endif %}>3PL지식저장소</option>
+                            <!-- 추가 지식 저장소 모델 확장 시 아래 <option>으로 등록 -->
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <button type="submit" class="btn btn-primary w-100 fw-bold py-2">데이터 실시간 조회</button>
+                    </div>
+                </div>
+
+                <!-- 2행: 날짜 필터 영역 -->
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label fw-bold text-secondary">조회 시작일</label>
+                        <input type="date" name="from" class="form-control py-2" value="{{ from_date }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-bold text-secondary">조회 종료일</label>
+                        <input type="date" name="to" class="form-control py-2" value="{{ to_date }}">
+                    </div>
+                </div>
+                
+                <!-- 3행: 키워드 검색 필드 -->
+                <div class="row mt-3">
+                    <div class="col-12">
+                        <input type="text" 
+                               name="keyword" 
+                               class="form-control py-2" 
+                               placeholder="본문 내용 키워드 검색 (예: 페링, 지오영, 보안)" 
+                               spellcheck="false"
+                               value="{{ keyword if keyword else '' }}">
+                    </div>
+                </div>
+            </form>
+
+            <hr class="text-muted opacity-25">
+
+            <!-- 데이터 리스트 테이블 -->
+            <div class="d-flex justify-content-between align-items-center mt-4 mb-3">
+                <h5 class="m-0 text-secondary fw-bold">📋 활성 문서 청크 리스트</h5>
+                <span class="badge bg-secondary px-3 py-2">조회된 모델: {{ selected_model_id }}</span>
+            </div>
+            
+            <div class="table-responsive">
+                <table class="table table-hover align-middle border-top">
+                    <thead class="table-dark">
+                        <tr>
+                            <th style="width: 140px;">문서 태그 ID</th>
+                            <th style="width: 120px;">등록일자</th>
+                            <th style="width: 60%;">본문 요약</th>
+                            <th style="width: 110px; text-align: center;">작업</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for doc in documents %}
+                        <tr>
+                            <td>
+                                <span class="badge bg-info text-dark fw-bold px-2 py-1" style="font-family: monospace;">{{ doc.ref_num }}</span>
+                            </td>
+                            <td class="text-secondary" style="font-family: monospace; font-size: 13px;">
+                                {{ doc.created_at }}
+                            </td>
+                            <td>
+                                <span class="text-dark-50" style="line-height: 1.5;">{{ doc.summary }}...</span>
+                            </td>
+                            <td class="text-center">
+                                <!-- 🎯 버튼 클릭 시 해당 청크의 model_id를 함께 전달 -->
+                                <a href="/view/document/{{ doc.ref_num }}?model_id={{ doc.model_id }}" class="btn btn-sm btn-outline-primary fw-medium px-3">조회 / 편집</a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

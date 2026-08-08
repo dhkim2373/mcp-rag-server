@@ -6,16 +6,22 @@ import asyncio
 import urllib.parse
 from datetime import datetime
 from contextlib import asynccontextmanager
+
 import pytz
 import psycopg
 import uvicorn
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
+
 from google import genai
 from google.genai import types
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from sentence_transformers import CrossEncoder
+
+# 💡 .env 환경 변수 로드
+load_dotenv()
 
 # 🔥 지식 CRUD 라우터 및 MCP 모듈 불러오기
 from routers import knowledge
@@ -35,20 +41,23 @@ app = FastAPI(title="3PL RAG & MCP Integrated Server", lifespan=lifespan)
 # 🎯 하위 라우터 패키지 병합 등록
 app.include_router(knowledge.router)
 
-# 구글 제미나이 API 클라이언트 선언
-client = genai.Client(api_key="AQ.Ab8RN6IHlYpkWtVxLrlwVzPx8D5wwl0XjymxLdX90RKvFauudA")
+# 구글 제미나이 API 클라이언트 선언 (환경변수 적용)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", os.getenv("GCP_API_KEY"))
+client = genai.Client(api_key=GEMINI_API_KEY)
 
+# DB 연결 정보 (환경변수 기본값 적용)
 MY_DATABASE_INFO = {
-    "host": "localhost", # Nginx 우회 사설 IP 고정
-    "dbname": "redbombz",
-    "user": "redbombz",
-    "password": "a11223344*",
-    "port": 5432
+    "host": os.getenv("DB_HOST", "localhost"),
+    "dbname": os.getenv("DB_NAME", "redbombz"),
+    "user": os.getenv("DB_USER", "redbombz"),
+    "password": os.getenv("DB_PASSWORD", "a11223344*"),
+    "port": int(os.getenv("DB_PORT", 5432))
 }
 
 print("⚙️ [로컬 백엔드 최적화] EXAONE 3.5 및 bge-m3 임베딩 엔진 로드 중...")
-local_llm = ChatOllama(base_url="http://localhost:11434", model="exaone3.5:7.8b", temperature=0)
-embeddings_engine = OllamaEmbeddings(base_url="http://localhost:11434", model="bge-m3")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+local_llm = ChatOllama(base_url=OLLAMA_BASE_URL, model="exaone3.5:7.8b", temperature=0)
+embeddings_engine = OllamaEmbeddings(base_url=OLLAMA_BASE_URL, model="bge-m3")
 
 # 🎯 [리랭커]: 가볍고 빠른 base 모델 유지
 print("⚙️ [Reranker 초기화] BAAI/bge-reranker-base 엔진 바인딩 중...")
@@ -107,7 +116,7 @@ async def handle_knowledge_retrieval_stream(user_last_text: str, user_context_in
         try:
             chain = query_splitter_prompt | local_llm
             local_res = await chain.ainvoke({"user_query": user_last_text})
-            local_res_text = local_res.content.strip()
+            local_res_text = str(local_res.content).strip()
             
             lines = [line.strip() for line in local_res_text.split('\n') if line.strip()]
             if lines:
@@ -139,44 +148,44 @@ async def handle_knowledge_retrieval_stream(user_last_text: str, user_context_in
     conn = None
     try:
         conn = psycopg.connect(**MY_DATABASE_INFO)
-        cur = conn.cursor()
-        for sub_q in sub_queries:
-            q_vector = embeddings_engine.embed_query(sub_q.strip())
-            
-            search_query = """
-                SELECT reference_number, content, (1 - (embedding <=> %s::vector)) AS similarity, created_at, chunk_id
-                FROM tb_document_chunk 
-                WHERE is_deleted = 0 
-                  AND model_id = %s
-                ORDER BY embedding <=> %s::vector ASC, chunk_id DESC 
-                LIMIT 10;
-            """
-            cur.execute(search_query, (q_vector, selected_model, q_vector))
-            for res in cur.fetchall():
-                ref_num, content_text, sim_score, created_at, chunk_id = res
+        with conn.cursor() as cur:
+            for sub_q in sub_queries:
+                q_vector = embeddings_engine.embed_query(sub_q.strip())
                 
-                if chunk_id in seen_chunk_ids:
-                    continue
-                seen_chunk_ids.add(chunk_id)
-                
-                if isinstance(created_at, datetime):
-                    date_str = created_at.strftime('%Y-%m-%d')
-                elif created_at:
-                    date_str = str(created_at)[:10]
-                else:
-                    date_str = datetime.now().strftime('%Y-%m-%d')
-                
-                sub_query_chunks[sub_q].append({
-                    "chunk_id": chunk_id,
-                    "ref_num": ref_num,
-                    "content": content_text,
-                    "date_str": date_str
-                })
-        cur.close()
+                search_query = """
+                    SELECT reference_number, content, (1 - (embedding <=> %s::vector)) AS similarity, created_at, chunk_id
+                    FROM tb_document_chunk 
+                    WHERE is_deleted = 0 
+                      AND model_id = %s
+                    ORDER BY embedding <=> %s::vector ASC, chunk_id DESC 
+                    LIMIT 10;
+                """
+                cur.execute(search_query, (q_vector, selected_model, q_vector))
+                for res in cur.fetchall():
+                    ref_num, content_text, sim_score, created_at, chunk_id = res
+                    
+                    if chunk_id in seen_chunk_ids:
+                        continue
+                    seen_chunk_ids.add(chunk_id)
+                    
+                    if isinstance(created_at, datetime):
+                        date_str = created_at.strftime('%Y-%m-%d')
+                    elif created_at:
+                        date_str = str(created_at)[:10]
+                    else:
+                        date_str = datetime.now().strftime('%Y-%m-%d')
+                    
+                    sub_query_chunks[sub_q].append({
+                        "chunk_id": chunk_id,
+                        "ref_num": ref_num,
+                        "content": content_text,
+                        "date_str": date_str
+                    })
     except Exception as db_err:
         print(f"❌ 벡터 DB 탐색 실패: {db_err}")
     finally:
-        if conn: conn.close()
+        if conn:
+            conn.close()
         
     dt_chunk = time.time() - t_start
     total_raw_chunks = sum(len(chunks) for chunks in sub_query_chunks.values())
@@ -311,7 +320,7 @@ async def chat_completions(request: Request):
     user_id = request.headers.get("x-openwebui-user-id", "Unknown_ID")
     user_email = request.headers.get("x-openwebui-user-email", "unknown@company.com")
 
-    base_url = "http://aimeow.ddns.net:20080"
+    base_url = os.getenv("BASE_URL", "http://aimeow.ddns.net:20080")
     start_time = time.time()            
     kst = pytz.timezone('Asia/Seoul')
     current_time_str = datetime.now(kst).strftime("%Y년 %m월 %d일 %A %H시 %M분 %S초")
