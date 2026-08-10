@@ -2,6 +2,7 @@ import os
 import json
 import re
 import time
+import math
 import asyncio
 import urllib.parse
 from datetime import datetime
@@ -179,7 +180,8 @@ async def handle_knowledge_retrieval_stream(user_last_text: str, user_context_in
                         "chunk_id": chunk_id,
                         "ref_num": ref_num,
                         "content": content_text,
-                        "date_str": date_str
+                        "date_str": date_str,
+                        "vector_similarity": float(sim_score)
                     })
     except Exception as db_err:
         print(f"❌ 벡터 DB 탐색 실패: {db_err}")
@@ -193,9 +195,15 @@ async def handle_knowledge_retrieval_stream(user_last_text: str, user_context_in
     yield format_stream_chunk(f"> * 🟢 **청킹문서매칭 완료** : [{selected_model}] 대상 총 {total_raw_chunks}건 후보군 격리 매칭 ({dt_chunk*1000:.1f} ms)\n", selected_model)
     await asyncio.sleep(0.01)
 
-    # 3단계: 로컬 크로스 인코더 리랭크 연산 구간
+    # 3단계: 크로스 인코더 순서 정렬 및 가변 상한선 수집 구간
     t_start = time.time()
     final_retrieved_contexts = []
+    selected_chunk_objects = []
+    
+    VECTOR_SIMILARITY_THRESHOLD = 0.35 
+    
+    # 🎯 [핵심 변경]: 기본 5개, 의도가 5개를 넘어가면 의도 개수만큼 수집 상한선 확장
+    MAX_TARGET_CHUNKS = max(5, len(sub_queries))
     
     try:
         for sub_q, chunks in sub_query_chunks.items():
@@ -205,8 +213,8 @@ async def handle_knowledge_retrieval_stream(user_last_text: str, user_context_in
             rerank_pairs = [[sub_q, chunk["content"]] for chunk in chunks]
             scores = reranker_engine.predict(rerank_pairs)
             
-            for idx, score in enumerate(scores):
-                chunks[idx]["rerank_score"] = float(score)
+            for idx, raw_score in enumerate(scores):
+                chunks[idx]["rerank_score"] = float(raw_score)
                 
             chunks.sort(key=lambda x: x["rerank_score"], reverse=True)
             
@@ -218,34 +226,55 @@ async def handle_knowledge_retrieval_stream(user_last_text: str, user_context_in
                 pool = sub_query_chunks[sub_q]
                 if depth < len(pool):
                     merged_chunks.append(pool[depth])
-                    if len(merged_chunks) >= 5:
+                    if len(merged_chunks) >= MAX_TARGET_CHUNKS: # 🎯 가변 상한선 적용
                         break
-            if len(merged_chunks) >= 5:
+            if len(merged_chunks) >= MAX_TARGET_CHUNKS: # 🎯 가변 상한선 적용
                 break
                 
         for target in merged_chunks:
-            fmt_context = f"[{target['ref_num']}] (기록일자: {target['date_str']}) (리랭킹점수: {target['rerank_score']:.4f}) {target['content']}"
+            vec_sim = target.get("vector_similarity", 0.0)
+            
+            if vec_sim < VECTOR_SIMILARITY_THRESHOLD:
+                print(f"⚠️ [저품질 청크 필터링] REF: {target['ref_num']} | DB 내적 유사도: {vec_sim:.4f} < {VECTOR_SIMILARITY_THRESHOLD}")
+                continue
+
+            fmt_context = f"[{target['ref_num']}] (기록일자: {target['date_str']}) (벡터유사도: {vec_sim*100:.1f}%) {target['content']}"
             final_retrieved_contexts.append(fmt_context)
+            selected_chunk_objects.append(target)
                 
     except Exception as rerank_err:
-        print(f"⚠️ [리랭커 라운드로빈 크래시 대응 폴백 전송] 원인: {rerank_err}")
+        print(f"⚠️ [리랭커 폴백] 원인: {rerank_err}")
         fallback_list = []
         for chunks in sub_query_chunks.values():
             fallback_list.extend(chunks)
-        for target in fallback_list[:5]:
-            fmt_context = f"[{target['ref_num']}] (기록일자: {target['date_str']}) (폴백백업) {target['content']}"
+        for target in fallback_list[:MAX_TARGET_CHUNKS]:
+            fmt_context = f"[{target['ref_num']}] (기록일자: {target['date_str']}) {target['content']}"
             final_retrieved_contexts.append(fmt_context)
+            selected_chunk_objects.append(target)
                 
     dt_rerank = time.time() - t_start
     print(f" 3. 크로스리랭크 완료 : 라운드로빈 융합 정렬 완료 | 소요시간: {dt_rerank:.4f}초 ({dt_rerank*1000:.1f} ms)")
-    yield format_stream_chunk(f"> * 🟢 **크로스리랭크 완료** : 의도별 1등 균등 분배 기반 상위 5개 교차 엄선 ({dt_rerank*1000:.1f} ms)\n>\n", selected_model)
+    
+    yield format_stream_chunk(f"> * 🟢 **크로스리랭크 완료** : 의도별 상위 {len(selected_chunk_objects)}개 유효 청크 교차 엄선 (목표 상한: {MAX_TARGET_CHUNKS}개 / {dt_rerank*1000:.1f} ms)\n", selected_model)
+
+    if selected_chunk_objects:
+        log_chunk_detail = "> \t📑 *[최종 엄선된 참조 청크 목록 & DB 벡터 유사도]*\n"
+        for chunk in selected_chunk_objects:
+            ref = chunk.get("ref_num", f"ID-{chunk.get('chunk_id')}")
+            vec_score_percent = chunk.get("vector_similarity", 0.0) * 100
+            summary = chunk.get("content", "").replace("\n", " ").strip()[:40]
+            log_chunk_detail += f"> \t  - 🔹 **[{ref}]** 유사도: `{vec_score_percent:.1f}%` | {summary}...\n"
+    else:
+        log_chunk_detail = "> \t⚠️ *[안내] 질의와의 연관성이 충분한 참조 청크가 발견되지 않았습니다. (일반 지능 답변 수행)*\n"
+        
+    yield format_stream_chunk(log_chunk_detail + ">\n", selected_model)
     await asyncio.sleep(0.01)
     
     # 4단계: 제미나이 최종 답안 작성 구간
     t_start = time.time()
     yield format_stream_chunk("> ✍️ *최종 지식 융합 및 답변 구성 중...*\n\n---\n\n", selected_model)
     
-    joined_context = "\n".join(final_retrieved_contexts)
+    joined_context = "\n".join(final_retrieved_contexts) if final_retrieved_contexts else "관련 지식 데이터 없음."
     rag_system_instruction = (
         f"{user_context_instruction}\n"
         "당신은 사내 통합 지식 보관소 데이터를 바탕으로 답변을 도출하는 팩트 검토 AI 보좌관입니다.\n"

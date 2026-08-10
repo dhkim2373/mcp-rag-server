@@ -95,8 +95,8 @@
             }
 
             try {
-                // DELETE API 호출 파이프라인
-                const response = await fetch(`/api/chunks/${chunkId}?model_id=${encodeURIComponent(modelId)}`, {
+                // 🎯 DELETE API 경로 수정 (/api/chunks/ -> /view/chunks/)
+                const response = await fetch(`/view/chunks/${chunkId}?model_id=${encodeURIComponent(modelId)}`, {
                     method: 'DELETE',
                     headers: {
                         'Content-Type': 'application/json'
