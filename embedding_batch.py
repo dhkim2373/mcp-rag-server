@@ -27,35 +27,21 @@ router = APIRouter(tags=["Webhook & Knowledge Ingestion"])
 
 
 # ============================================================
-# 📩 웹훅 수신 전용 Pydantic 모델 & 마크다운 정제 헬퍼
+# 📩 웹훅 수신 전용 Pydantic 모델 (🎯 최신 규격 반영)
 # ============================================================
 class ChunkLine(BaseModel):
-    line_index: str
-    page_number: Optional[int] = 1
+    page_no: Optional[str] = "1"
     text: str
-    is_split_point: Optional[bool] = False
-    is_deleted: Optional[bool] = False
 
 class WebhookPayload(BaseModel):
     user_name: Optional[str] = "SYSTEM"
     global_prefix: Optional[str] = ""
     source_filename: Optional[str] = "WEBHOOK_INPUT"
-    model_id: Optional[str] = "3PL지식저장소"  # 🎯 모델격리 ID 추가 (기본값 설정)
+    model_id: Optional[str] = "3PL지식저장소"  # 🎯 모델격리 ID (기본값 설정)
     chunks: List[ChunkLine]
 
-def strip_markdown(text_content: str) -> str:
-    if not text_content: 
-        return ""
-    text_content = re.sub(r'<br\s*/?>', ' ', text_content, flags=re.IGNORECASE)
-    text_content = re.sub(r'#{1,6}\s+', '', text_content)
-    text_content = re.sub(r'\*\*([^*]+)\*\*?', r'\1', text_content)
-    text_content = re.sub(r'\*([^*]+)\*', r'\1', text_content)
-    lines = [line.strip() for line in text_content.split('\n') if line.strip()]
-    return "\n".join(lines)
-
-
 # ============================================================
-# 🔄 배치(Batch) 루프 프로세서 (🎯 model_id 이관 및 document_id 제거)
+# 🔄 배치(Batch) 루프 프로세서
 # ============================================================
 def process_batch():
     """tb_raw_document에서 READY 상태 데이터를 가져와 임베딩 후 tb_document_chunk에 이관"""
@@ -64,7 +50,7 @@ def process_batch():
         conn = psycopg.connect(**MY_DATABASE_INFO)
         cur = conn.cursor()
         
-        # 1) 처리 대기 중인 스테이징 데이터 픽업 (model_id 함께 추출)
+        # 1) 처리 대기 중인 스테이징 데이터 픽업
         cur.execute("""
             SELECT raw_id, user_name, content, source_filename, model_id 
             FROM tb_raw_document 
@@ -114,7 +100,7 @@ def process_batch():
         else:
             ref_tag = f"USER_MEM_{next_order}"
         
-        # 🎯 RAG 검색 테이블 적재 (document_id 제거, model_id 저장)
+        # 🎯 RAG 검색 테이블 적재 (model_id 저장)
         insert_query = """
             INSERT INTO tb_document_chunk (chunk_order, reference_number, content, embedding, model_id, is_deleted)
             VALUES (%s, %s, %s, %s, %s, 0);
@@ -143,7 +129,7 @@ def process_batch():
 # ⏱️ 백그라운드 스케줄러 태스크
 # ============================================================
 async def run_batch_loop():
-    print("⏳ 명시적 REF 추적 및 오픈웹UI 메모리 배치 스케줄러 가동 중...")
+    print("⏳ 명시적 REF 추적 및 지식 DB 배치 스케줄러 가동 중...")
     while True:
         try:
             await asyncio.to_thread(process_batch)
@@ -154,10 +140,8 @@ async def run_batch_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 서버 스타트업 시 백그라운드 배치 프로세스 시작
     batch_task = asyncio.create_task(run_batch_loop())
     yield
-    # 서버 종료 시 배치 태스크 취소
     batch_task.cancel()
 
 
@@ -170,42 +154,36 @@ app = FastAPI(title="Knowledge Base Ingestion & Embedding Service", lifespan=lif
 @router.post("/api/webhook/ingest")
 def webhook_ingest_chunks(payload: WebhookPayload):
     """
-    AI Meow 등 외부 시스템에서 가공이 끝난 청크 데이터를 수신하여
-    tb_raw_document 테이블에 지정된 model_id와 함께 'READY' 상태로 적재
+    🎯 AI Meow에서 정제 및 결합이 완료된 청크 데이터를 수신하여
+    tb_raw_document 테이블에 'READY' 상태로 적재
     """
-    valid_chunks = [item for item in payload.chunks if not getattr(item, 'is_deleted', False)]
-    current_chunk_buffer = []
-    chunk_group_idx = 0
     conn = None
-
+    chunk_count = 0
     target_model_id = payload.model_id if payload.model_id else "3PL지식저장소"
+    filename_val = payload.source_filename if payload.source_filename else "WEBHOOK_INPUT"
 
     try:
         conn = psycopg.connect(**MY_DATABASE_INFO)
         cursor = conn.cursor()
         
-        # 🎯 model_id 컬럼 바인딩 추가
         insert_query = """
             INSERT INTO public.tb_raw_document (user_name, content, status, source_filename, model_id) 
             VALUES (%s, %s, 'READY', %s, %s);
         """
         
-        for idx, item in enumerate(valid_chunks):
-            current_chunk_buffer.append(item.text)
-            
-            if item.is_split_point or idx == len(valid_chunks) - 1:
-                raw_markdown_content = "\n".join(current_chunk_buffer).strip()
-                if raw_markdown_content:
-                    clean_plain_text = strip_markdown(raw_markdown_content)
-                    prefix_str = payload.global_prefix.strip() if payload.global_prefix else ""
-                    if prefix_str: 
-                        clean_plain_text = f"[{prefix_str}]\n{clean_plain_text}"
-                    
-                    filename_val = payload.source_filename if payload.source_filename else "WEBHOOK_INPUT"
-                    
-                    cursor.execute(insert_query, (payload.user_name, clean_plain_text, filename_val, target_model_id))
-                    chunk_group_idx += 1
-                    current_chunk_buffer = [] 
+        # 🎯 최신 수신 규격(chunks: [{ page_no, text }]) 1:1 적재
+        for chunk in payload.chunks:
+            chunk_text = chunk.text.strip()
+            if not chunk_text:
+                continue
+                
+            cursor.execute(insert_query, (
+                payload.user_name, 
+                chunk_text, 
+                filename_val, 
+                target_model_id
+            ))
+            chunk_count += 1
         
         conn.commit()
         cursor.close()
@@ -219,11 +197,10 @@ def webhook_ingest_chunks(payload: WebhookPayload):
                 
     return {
         "status": "success", 
-        "message": f"성공적으로 {chunk_group_idx}개의 청크가 [{target_model_id}] 지식 DB에 수신/적재되었습니다!"
+        "message": f"성공적으로 {chunk_count}개의 청크가 [{target_model_id}] 지식 DB에 수신/적재되었습니다!"
     }
 
 
-# 라우터 엔드포인트를 독립 실행 시에도 동작하도록 병합
 app.include_router(router)
 
 if __name__ == "__main__":

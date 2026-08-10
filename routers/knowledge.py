@@ -2,7 +2,7 @@ import os
 import re
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Request, Query, HTTPException, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 import psycopg
 from langchain_ollama import OllamaEmbeddings
@@ -28,7 +28,7 @@ embeddings_engine = OllamaEmbeddings(base_url="http://localhost:11434", model="b
 
 
 # ==========================================================
-# ❶ [웹 화면] 20080/view/list - model_id 필수 검증 적용
+# ❶ [웹 화면] /view/list - model_id 필수 검증 적용
 # ==========================================================
 @router.get("/list", response_class=HTMLResponse)
 async def get_knowledge_list(
@@ -36,7 +36,7 @@ async def get_knowledge_list(
     from_date: str = Query(None, alias="from"),
     to_date: str = Query(None, alias="to"),
     keyword: str = Query(None),
-    model_id: str = Query(None)  # 🎯 필수값 검증을 위해 기본값 None으로 변경
+    model_id: str = Query(None)  # 🎯 필수값 검증 대상
 ):
     # 🚨 model_id 누락 시 400 Bad Request 에러 차단
     if not model_id or not model_id.strip():
@@ -107,7 +107,7 @@ async def get_knowledge_list(
 
 
 # ==========================================================
-# ❷ [웹 화면] 20080/view/document/{ref_num} - model_id 필수 검증 적용
+# ❷ [웹 화면] /view/document/{ref_num} - 상세 조회 및 편집
 # ==========================================================
 @router.get("/document/{ref_num}", response_class=HTMLResponse)
 async def view_and_edit_document(
@@ -115,7 +115,6 @@ async def view_and_edit_document(
     ref_num: str,
     model_id: str = Query(None)  # 🎯 필수 검증 대상
 ):
-    # 🚨 model_id 누락 시 400 Bad Request 에러 차단
     if not model_id or not model_id.strip():
         raise HTTPException(
             status_code=400, 
@@ -167,7 +166,7 @@ async def save_and_reembed_document(
     ref_num: str, 
     content: str = Form(...), 
     chunk_id: int = Form(...),
-    model_id: str = Form(...)  # 🎯 Form에서도 model_id를 필수 전송값으로 지정
+    model_id: str = Form(...)  # 🎯 Form 필수 전송값
 ):
     if not model_id or not model_id.strip():
         raise HTTPException(
@@ -197,5 +196,68 @@ async def save_and_reembed_document(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"정밀 고유 키 업데이트 중 실패: {str(e)}")
+    finally:
+        if conn: conn.close()
+
+
+# ==========================================================
+# ❹ [비즈니스 기능] 🎯 청크 논리 삭제(Soft Delete) API 추가
+# ==========================================================
+@router.delete("/chunks/{chunk_id}")
+async def delete_document_chunk(
+    chunk_id: int,
+    model_id: str = Query(None)
+):
+    """
+    고유 chunk_id와 model_id를 검증하여 해당 지식 청크를 논리 삭제(is_deleted = 1) 처리합니다.
+    """
+    if not model_id or not model_id.strip():
+        raise HTTPException(
+            status_code=400, 
+            detail="[삭제 에러] model_id 파라미터가 누락되었습니다."
+        )
+
+    conn = None
+    target_model_id = model_id.strip()
+    try:
+        conn = psycopg.connect(**MY_DATABASE_INFO)
+        with conn.cursor() as cur:
+            # 1. 대상 데이터 존재 유무 확인
+            check_query = """
+                SELECT chunk_id FROM tb_document_chunk 
+                WHERE chunk_id = %s AND model_id = %s AND is_deleted = 0;
+            """
+            cur.execute(check_query, (chunk_id, target_model_id))
+            if not cur.fetchone():
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"삭제할 대상을 찾을 수 없거나 이미 삭제되었습니다. (chunk_id: {chunk_id})"
+                )
+
+            # 2. 소프트 삭제 수행 (is_deleted = 1)
+            delete_query = """
+                UPDATE tb_document_chunk 
+                SET is_deleted = 1,
+                    created_at = NOW()
+                WHERE chunk_id = %s AND model_id = %s;
+            """
+            cur.execute(delete_query, (chunk_id, target_model_id))
+            conn.commit()
+
+        return JSONResponse(
+            status_code=200, 
+            content={
+                "status": "success", 
+                "message": f"청크 (ID: {chunk_id})가 성공적으로 삭제 처리되었습니다."
+            }
+        )
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"청크 삭제 처리 중 오류가 발생했습니다: {str(e)}"
+        )
     finally:
         if conn: conn.close()

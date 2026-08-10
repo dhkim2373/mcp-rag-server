@@ -2,7 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import psycopg
 import uvicorn
-from mcp import FastMCP
+from mcp.server.fastmcp import FastMCP
 from langchain_ollama import OllamaEmbeddings
 
 # ⚙️ DB 및 임베딩 엔진 설정

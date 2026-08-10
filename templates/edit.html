@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <title>원문 상세조회 및 재임베딩 - {{ ref_num }}</title>
+    <title>원문 상세조회 및 관리 - {{ ref_num }}</title>
     <!-- 구글 폰트 Noto Sans KR 추가 -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -23,11 +23,11 @@
             font-size: 15px !important;
             line-height: 1.65 !important;
             font-weight: 400;
-            letter-spacing: -0.02em; /* 자간을 미세하게 좁혀 또렷하게 조절 */
+            letter-spacing: -0.02em;
             color: #202124;
             padding: 18px !important;
             border: 1px solid #dadce0 !important;
-            background-color: #ffffff !important; /* 글씨가 더 잘 보이도록 백그라운드 화이트 변경 */
+            background-color: #ffffff !important;
             transition: border-color 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
             resize: vertical;
         }
@@ -45,21 +45,20 @@
         <div class="card shadow p-4 bg-white rounded-3 border-0">
             <div class="d-flex justify-content-between align-items-center border-bottom pb-3 mb-4">
                 <div>
-                    <h3 class="m-0 text-dark fw-bold" style="letter-spacing: -0.03em;">📄 지식 저장소 원천 데이터 수정</h3>
+                    <h3 class="m-0 text-dark fw-bold" style="letter-spacing: -0.03em;">📄 지식 저장소 원천 데이터 수정 및 관리</h3>
                     <small class="text-muted">실시간 계측 일시: {{ current_time }}</small>
                 </div>
                 <span class="badge bg-primary fs-6 px-3 py-2" style="font-family: monospace;">{{ ref_num }}</span>
             </div>
 
-            <!-- 수정 폼 전송 파이프라인 -->
-            <form action="/view/document/{{ ref_num }}/save" method="POST">
+            <!-- 수정 및 저장 폼 -->
+            <form action="/view/document/{{ ref_num }}/save" method="POST" id="editForm">
                 <!-- 🎯 고유 청크 키 및 model_id 폼 전송 데이터 정의 -->
-                <input type="hidden" name="chunk_id" value="{{ chunk_id }}">
-                <input type="hidden" name="model_id" value="{{ model_id }}">
+                <input type="hidden" name="chunk_id" id="chunk_id" value="{{ chunk_id }}">
+                <input type="hidden" name="model_id" id="model_id" value="{{ model_id }}">
                 
                 <div class="mb-4">
                     <label class="form-label fw-bold text-secondary mb-2">원문 지식 텍스트 편집</label>
-                    <!-- spellcheck="false" 추가로 빨간 밑줄 방지, 클래스 적용 -->
                     <textarea name="content" 
                               class="form-control custom-textarea" 
                               rows="14" 
@@ -68,13 +67,55 @@
                     <div class="form-text mt-2 text-muted">💡 저장 시 고유 청크 키를 기반으로 정밀 재임베딩 및 팩트 갱신이 안전하게 수행됩니다.</div>
                 </div>
 
-                <div class="d-flex justify-content-end gap-2">
-                    <!-- 🎯 목록으로 돌아가기 버튼 클릭 시 model_id 쿼리 파라미터 바인딩 -->
-                    <a href="/view/list?model_id={{ model_id }}" class="btn btn-outline-secondary px-4">목록으로 돌아가기</a>
-                    <button type="submit" class="btn btn-success px-5 fw-bold">편집 내용 저장 및 재임베딩</button>
+                <div class="d-flex justify-content-between align-items-center">
+                    <!-- 🎯 위험 작업 구역: 청크 삭제 버튼 -->
+                    <button type="button" class="btn btn-outline-danger px-3" onclick="deleteChunk()">
+                        🗑️ 이 청크 완전 삭제
+                    </button>
+
+                    <div class="d-flex gap-2">
+                        <!-- 목록으로 돌아가기 -->
+                        <a href="/view/list?model_id={{ model_id }}" class="btn btn-outline-secondary px-4">목록으로 돌아가기</a>
+                        <!-- 편집 저장 및 재임베딩 -->
+                        <button type="submit" class="btn btn-success px-4 fw-bold">편집 내용 저장 및 재임베딩</button>
+                    </div>
                 </div>
             </form>
         </div>
     </div>
+
+    <!-- 삭제 처리 스크립트 -->
+    <script>
+        async function deleteChunk() {
+            const chunkId = document.getElementById('chunk_id').value;
+            const modelId = document.getElementById('model_id').value;
+
+            if (!confirm(`정말로 이 청크(${chunkId})를 DB에서 완전히 삭제하시겠습니까?\n삭제된 데이터는 검색에 응답되지 않습니다.`)) {
+                return;
+            }
+
+            try {
+                // DELETE API 호출 파이프라인
+                const response = await fetch(`/api/chunks/${chunkId}?model_id=${encodeURIComponent(modelId)}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                if (response.ok) {
+                    alert('청크가 성공적으로 삭제되었습니다.');
+                    // 삭제 성공 시 목록 페이지로 이동
+                    window.location.href = `/view/list?model_id=${encodeURIComponent(modelId)}`;
+                } else {
+                    const errData = await response.json();
+                    alert(`삭제 실패: ${errData.detail || '오류가 발생했습니다.'}`);
+                }
+            } catch (error) {
+                console.error('Error deleting chunk:', error);
+                alert('삭제 요청 중 서버 통신 오류가 발생했습니다.');
+            }
+        }
+    </script>
 </body>
 </html>

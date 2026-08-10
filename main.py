@@ -48,9 +48,9 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 # DB 연결 정보 (환경변수 기본값 적용)
 MY_DATABASE_INFO = {
     "host": os.getenv("DB_HOST", "localhost"),
-    "dbname": os.getenv("DB_NAME", "redbombz"),
-    "user": os.getenv("DB_USER", "redbombz"),
-    "password": os.getenv("DB_PASSWORD", "a11223344*"),
+    "dbname": os.getenv("DB_NAME", ""),
+    "user": os.getenv("DB_USER", ""),
+    "password": os.getenv("DB_PASSWORD", ""),
     "port": int(os.getenv("DB_PORT", 5432))
 }
 
