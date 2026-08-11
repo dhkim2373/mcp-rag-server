@@ -338,7 +338,7 @@ def list_models():
         "object": "list",
         "data": [
             {"id": "3PL지식저장소", "object": "model", "created": int(time.time()), "owned_by": "redbombz"},
-            {"id": "Nexacro14", "object": "model", "created": int(time.time()), "owned_by": "redbombz"}
+            {"id": "의약품스마트검색", "object": "model", "created": int(time.time()), "owned_by": "redbombz"}
         ]
     }
 
@@ -349,7 +349,7 @@ async def chat_completions(request: Request):
     user_id = request.headers.get("x-openwebui-user-id", "Unknown_ID")
     user_email = request.headers.get("x-openwebui-user-email", "unknown@company.com")
 
-    base_url = os.getenv("BASE_URL", "http://aimeow.ddns.net:20080")
+    base_url = os.getenv("BASE_URL", "https://aimeow.duckdns.org:20443")
     start_time = time.time()            
     kst = pytz.timezone('Asia/Seoul')
     current_time_str = datetime.now(kst).strftime("%Y년 %m월 %d일 %A %H시 %M분 %S초")

@@ -68,8 +68,16 @@
                     <div class="col-md-8">
                         <label class="form-label fw-bold text-secondary">지식 저장소 모델 선택 (model_id)</label>
                         <select name="model_id" class="form-select py-2 fw-bold text-primary" required>
+                            <!-- 🎯 하드코딩 제거 및 동적 모델 리스트 렌더링 (백엔드에서 available_models 리스트를 넘겨준다고 가정) -->
+                            <!-- 만약 단일 모델이라면 selected_model_id와 비교하여 선택 처리 -->
                             <option value="3PL지식저장소" {% if selected_model_id == "3PL지식저장소" %}selected{% endif %}>3PL지식저장소</option>
-                            <!-- 추가 지식 저장소 모델 확장 시 아래 <option>으로 등록 -->
+                            <option value="의약품스마트검색" {% if selected_model_id == "의약품스마트검색" %}selected{% endif %}>의약품스마트검색</option>
+                            
+                            {% for m in available_models %}
+                                {% if m not in ["3PL지식저장소", "의약품스마트검색"] %}
+                                <option value="{{ m }}" {% if selected_model_id == m %}selected{% endif %}>{{ m }}</option>
+                                {% endif %}
+                            {% endfor %}
                         </select>
                     </div>
                     <div class="col-md-4">

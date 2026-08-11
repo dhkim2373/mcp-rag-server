@@ -37,7 +37,7 @@ class WebhookPayload(BaseModel):
     user_name: Optional[str] = "SYSTEM"
     global_prefix: Optional[str] = ""
     source_filename: Optional[str] = "WEBHOOK_INPUT"
-    model_id: Optional[str] = "3PL지식저장소"  # 🎯 모델격리 ID (기본값 설정)
+    model_id: Optional[str] = "의약품스마트검색"
     chunks: List[ChunkLine]
 
 # ============================================================
@@ -159,7 +159,7 @@ def webhook_ingest_chunks(payload: WebhookPayload):
     """
     conn = None
     chunk_count = 0
-    target_model_id = payload.model_id if payload.model_id else "3PL지식저장소"
+    target_model_id = payload.model_id
     filename_val = payload.source_filename if payload.source_filename else "WEBHOOK_INPUT"
 
     try:
