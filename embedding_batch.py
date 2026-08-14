@@ -20,18 +20,17 @@ from tkinter import messagebox
 ENV_FILE_PATH = ".env"
 load_dotenv(ENV_FILE_PATH, override=True)
 
-# UI 및 관리 대상 키 목록에 EMBEDDING_MODEL 추가
 CONFIG_KEYS = [
-    "BASE_URL",
     "GEMINI_API_KEY",
     "DB_HOST",
-    "DB_PORT",    
     "DB_NAME",
     "DB_USER",
     "DB_PASSWORD",
+    "DB_PORT",
     "OLLAMA_BASE_URL",
-    "EMBEDDING_MODEL",
-    "DEFAULT_MODEL_ID"
+    "BASE_URL",
+    "DEFAULT_MODEL_ID",
+    "EMBEDDING_MODEL"
 ]
 
 class SettingsManager:
@@ -40,14 +39,14 @@ class SettingsManager:
         load_dotenv(ENV_FILE_PATH, override=True)
         cls.DB_INFO = {
             "host": os.getenv("DB_HOST", "localhost"),
-            "dbname": os.getenv("DB_NAME", ""),
-            "user": os.getenv("DB_USER", ""),
-            "password": os.getenv("DB_PASSWORD", ""),
+            "dbname": os.getenv("DB_NAME", "redbombz"),
+            "user": os.getenv("DB_USER", "redbombz"),
+            "password": os.getenv("DB_PASSWORD", "a11223344*"),
             "port": int(os.getenv("DB_PORT", 5432))
         }
         cls.OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        cls.DEFAULT_MODEL_ID = os.getenv("DEFAULT_MODEL_ID", "3PL지식저장소")
-        cls.BASE_URL = os.getenv("BASE_URL", "http://host.docker.internal:8050")
+        cls.DEFAULT_MODEL_ID = os.getenv("DEFAULT_MODEL_ID", "의약품스마트검색")
+        cls.BASE_URL = os.getenv("BASE_URL", "http://aimeow.duckdns.org:8000")
         cls.EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
         
         print(f"⚙️ [설정 갱신] Ollama 엔진 재적재 중... (URL: {cls.OLLAMA_BASE_URL} / 모델: {cls.EMBEDDING_MODEL})")
@@ -228,32 +227,47 @@ app.include_router(router)
 
 
 # ============================================================
-# 🖥️ 사용자 편의적 2단 레이아웃 Tkinter 설정 UI 클래스
+# 🖥️ Tkinter 설정 UI 클래스 (로컬 HTML 파일 직접 오픈 기능)
 # ============================================================
 class ConfigUIApp:
     def __init__(self, root):
         self.root = root
         self.root.title("⚙️ RAG 시스템 환경 설정 및 웹훅 가이드")
-        self.root.geometry("620x840")
+        self.root.geometry("620x920")
         self.root.resizable(False, False)
 
         self.entries = {}
 
-        # 상단 타이틀
         title_label = tk.Label(root, text="RAG 지식 수신 서버 설정 관리", font=("Arial", 14, "bold"), fg="#333")
         title_label.pack(pady=10)
 
-        # ---------------- 패널 1: 웹훅 URL 안내 박스 ----------------
         webhook_frame = tk.LabelFrame(root, text=" 🔗 외부 연동 웹훅(Webhook) 안내 ", font=("Arial", 10, "bold"), fg="#0056b3", padx=10, pady=10)
         webhook_frame.pack(fill="x", padx=20, pady=5)
 
-        tk.Label(webhook_frame, text="외부 시스템(AI Meow 등)에서 지식 데이터를 전송할 엔드포인트 주소입니다:", font=("Arial", 9), anchor="w").pack(fill="x")
+        tk.Label(webhook_frame, text="외부 시스템에서 지식 데이터를 전송할 엔드포인트 주소입니다:", font=("Arial", 9), anchor="w").pack(fill="x")
         
         self.webhook_entry = tk.Entry(webhook_frame, font=("Arial", 10, "bold"), bg="#eef2f7", fg="#333", justify="center")
         self.webhook_entry.pack(fill="x", pady=5, ipady=3)
         self.update_webhook_display()
 
-        # ---------------- 패널 2: 환경 변수 입력 폼 (2줄 레이아웃 적용) ----------------
+        viewer_frame = tk.LabelFrame(root, text=" 📊 PostgreSQL 테이블 모니터링 ", font=("Arial", 10, "bold"), fg="#e83e8c", padx=10, pady=8)
+        viewer_frame.pack(fill="x", padx=20, pady=5)
+
+        tk.Label(viewer_frame, text="로컬에 저장된 템플릿 파일(embedding_table.html)을 직접 엽니다:", font=("Arial", 9), anchor="w").pack(fill="x")
+        
+        import webbrowser
+        
+        def open_local_html_viewer():
+            html_path = os.path.abspath("./templates/embedding_table.html")
+            if os.path.exists(html_path):
+                webbrowser.open(f"file:///{html_path.replace(os.sep, '/')}")
+            else:
+                messagebox.showerror("파일 없음", f"❌ 지정된 경로에 뷰어 파일이 없습니다:\n{html_path}")
+
+        open_viewer_btn = tk.Button(viewer_frame, text="🌐 HTML 파일 직접 열기", bg="#e83e8c", fg="white", font=("Arial", 10, "bold"), 
+                                    command=open_local_html_viewer)
+        open_viewer_btn.pack(fill="x", pady=5, ipady=3)
+
         form_outer_frame = tk.LabelFrame(root, text=" 🗄️ PostgreSQL DB 및 서비스 환경 변수 설정 ", font=("Arial", 10, "bold"), fg="#28a745", padx=10, pady=10)
         form_outer_frame.pack(fill="both", expand=True, padx=20, pady=10)
 
@@ -272,7 +286,7 @@ class ConfigUIApp:
 
         for idx, key in enumerate(CONFIG_KEYS):
             row_frame = tk.Frame(form_outer_frame)
-            row_frame.pack(fill="x", pady=4)
+            row_frame.pack(fill="x", pady=3)
 
             top_sub_frame = tk.Frame(row_frame)
             top_sub_frame.pack(fill="x")
@@ -281,7 +295,6 @@ class ConfigUIApp:
             lbl.pack(side="left")
 
             val = os.getenv(key, "")
-            show_char = "*" if "PASSWORD" in key or "KEY" in key else None
             
             entry = tk.Entry(top_sub_frame, width=45, show=None, font=("Arial", 9))
             entry.insert(0, val)
@@ -294,7 +307,6 @@ class ConfigUIApp:
             desc_lbl = tk.Label(bottom_sub_frame, text=descriptions.get(key, ""), anchor="w", font=("Arial", 8), fg="#666")
             desc_lbl.pack(side="left", pady=(1, 2))
 
-        # ---------------- 하단: 저장 및 핫스왑 버튼 ----------------
         save_btn = tk.Button(root, text="💾 설정 저장 및 핫스왑(실시간 반영)", bg="#007BFF", fg="white", font=("Arial", 11, "bold"), command=self.save_and_reload)
         save_btn.pack(pady=10, ipadx=15, ipady=5)
 
