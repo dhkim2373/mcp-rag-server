@@ -14,6 +14,7 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from google import genai
 from google.genai import types
@@ -21,26 +22,44 @@ from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from sentence_transformers import CrossEncoder
 
+import tkinter as tk
+from tkinter import messagebox
+import threading
+import sys
+
 # 💡 .env 환경 변수 로드
 load_dotenv()
 
-# 🔥 지식 CRUD 라우터 및 MCP 모듈 불러오기
+# 🔥 지식 CRUD 라우터 불러오기
 from routers import knowledge
-from routers.mcp_router import mcp_server_lifespan
+
+# 🛠️ [신규 추가] 모델 ID 및 프롬프트 관리 동적 모듈 불러오기
+from model_config_manager import load_model_configs, get_model_system_instruction
 
 # ==========================================================
-# ⏱️ [FastAPI 통합 Lifespan]: MCP 백그라운드 서버 연결
+# ⏱️ [FastAPI 통합 Lifespan]
 # ==========================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 원격 MCP SSE 서버 백그라운드 가동
-    async with mcp_server_lifespan():
-        yield
+    print("🚀 [3PL RAG 서버] 가동 시작 및 리소스 초기화 완료 (모델 설정 동기화 활성화)")
+    yield
+    print("🛑 [3PL RAG 서버] 안전 종료 중...")
 
-app = FastAPI(title="3PL RAG & MCP Integrated Server", lifespan=lifespan)
+app = FastAPI(title="3PL RAG Server", lifespan=lifespan)
 
-# 🎯 하위 라우터 패키지 병합 등록
+# 🎯 하위 지식 라우터 패키지 병합 등록
 app.include_router(knowledge.router)
+
+# ==========================================================
+# 🛡️ [CORS 미들웨어 추가]: UI 깜빡임 및 API 통신 오류 방지
+# ==========================================================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 필요에 따라 특정 도메인으로 제한 가능
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # 구글 제미나이 API 클라이언트 선언 (환경변수 적용)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", os.getenv("GCP_API_KEY"))
@@ -64,14 +83,16 @@ embeddings_engine = OllamaEmbeddings(base_url=OLLAMA_BASE_URL, model="bge-m3")
 print("⚙️ [Reranker 초기화] BAAI/bge-reranker-base 엔진 바인딩 중...")
 reranker_engine = CrossEncoder("BAAI/bge-reranker-base", max_length=512)
 
+# 🎯 [의도 분할 프롬프트]: 무조건 한글로 분할/정제되도록 강제
 query_splitter_prompt = ChatPromptTemplate.from_messages([
-    ("system", """당신은 입력된 문장에 여러 개의 요구사항이 섞여 있을 경우, 이를 지식 검색에 용이한 독립된 검색어(질문)로 분할하는 엔진입니다.
+    ("system", """당신은 입력된 질문을 지식 검색에 용이한 독립된 검색어(질문)로 분할하는 엔진입니다.
 
 [엄격 규칙]
-1. 인사말, 설명, 생각 과정, 서론은 절대 출력하지 마세요.
-2. 마크다운 기호나 JSON, 번호 매기기(1., 2.)를 쓰지 마세요.
-3. 오직 분할된 검색어만 한 줄에 하나씩(줄바꿈으로만 구분) 즉시 출력하세요.
-4. 질문 내용이 단일하거나 분할할 필요가 없다면, 입력된 문장 그대로 딱 한 줄만 출력하세요."""),
+1. 🚨 [필수] 입력 질문의 언어가 무엇이든, **분할된 모든 출력 결과는 반드시 '한국어(한글)'로 번역 및 작성**하세요.
+2. 인사말, 설명, 생각 과정, 서론은 절대 출력하지 마세요.
+3. 마크다운 기호나 JSON, 번호 매기기(1., 2.)를 쓰지 마세요.
+4. 오직 분할된 검색어만 한 줄에 하나씩(줄바꿈으로만 구분) 즉시 출력하세요.
+5. 질문 내용이 단일하거나 분할할 필요가 없다면, 내용을 한국어로 정제하여 딱 한 줄만 출력하세요."""),
     ("user", "분석할 사용자 질문:\n\n{user_query}")
 ])
 
@@ -96,7 +117,7 @@ def format_stream_chunk(text: str, model_name: str) -> str:
 # ==========================================================
 # 🛠️ 비동기 RAG 파이프라인 Generator
 # ==========================================================
-async def handle_knowledge_retrieval_stream(user_last_text: str, user_context_instruction: str, openai_messages: list, selected_model: str, base_url: str, start_time: float):
+async def handle_knowledge_retrieval_stream(user_last_text: str, openai_messages: list, selected_model: str, base_url: str, start_time: float):
     print("\n" + "="*60)
     print(f"📥 [RAG 파이프라인 가동] 대상 모델: \"{selected_model}\" | 유저 질문: \"{user_last_text}\"")
     print("-"*60)
@@ -104,7 +125,7 @@ async def handle_knowledge_retrieval_stream(user_last_text: str, user_context_in
     yield format_stream_chunk("> 🛠️ **[RAG 시스템 파이프라인 가동 분석]**\n>\n", selected_model)
     await asyncio.sleep(0.01)
 
-    # 1단계: 질문 의도 분할 구간
+    # 1단계: 질문 의도 분할 구간 (무조건 한글 출력)
     t_start = time.time()
     sub_queries = [user_last_text]
     split_count = 1
@@ -132,10 +153,10 @@ async def handle_knowledge_retrieval_stream(user_last_text: str, user_context_in
         log_1 = f"> * 🟢 **질문의도분할 완료** : {split_count}건 분리 ({dt_split*1000:.1f} ms)\n"
         yield format_stream_chunk(log_1, selected_model)
 
-    print(f"    💡 [분할된 상세 의도 목록]")
+    print(f"    💡 [분할된 상세 의도 목록 (한글 정제)]")
     log_intent = "> \t💡 *[분할된 상세 의도 목록]*\n"
     for idx, sub_q in enumerate(sub_queries, 1):
-        print(f"       📌 의도 {idx}: {sub_q}")
+        print(f"      📌 의도 {idx}: {sub_q}")
         log_intent += f"> \t  - 📌 의도 {idx}: {sub_q}\n"
     yield format_stream_chunk(log_intent + ">\n", selected_model)
     print("-"*60)
@@ -201,8 +222,6 @@ async def handle_knowledge_retrieval_stream(user_last_text: str, user_context_in
     selected_chunk_objects = []
     
     VECTOR_SIMILARITY_THRESHOLD = 0.35 
-    
-    # 🎯 [핵심 변경]: 기본 5개, 의도가 5개를 넘어가면 의도 개수만큼 수집 상한선 확장
     MAX_TARGET_CHUNKS = max(5, len(sub_queries))
     
     try:
@@ -226,9 +245,9 @@ async def handle_knowledge_retrieval_stream(user_last_text: str, user_context_in
                 pool = sub_query_chunks[sub_q]
                 if depth < len(pool):
                     merged_chunks.append(pool[depth])
-                    if len(merged_chunks) >= MAX_TARGET_CHUNKS: # 🎯 가변 상한선 적용
+                    if len(merged_chunks) >= MAX_TARGET_CHUNKS:
                         break
-            if len(merged_chunks) >= MAX_TARGET_CHUNKS: # 🎯 가변 상한선 적용
+            if len(merged_chunks) >= MAX_TARGET_CHUNKS:
                 break
                 
         for target in merged_chunks:
@@ -265,19 +284,25 @@ async def handle_knowledge_retrieval_stream(user_last_text: str, user_context_in
             summary = chunk.get("content", "").replace("\n", " ").strip()[:40]
             log_chunk_detail += f"> \t  - 🔹 **[{ref}]** 유사도: `{vec_score_percent:.1f}%` | {summary}...\n"
     else:
-        log_chunk_detail = "> \t⚠️ *[안내] 질의와의 연관성이 충분한 참조 청크가 발견되지 않았습니다. (일반 지능 답변 수행)*\n"
+        log_chunk_detail = "> \t⚠️ *[안내] 질의와 연관성이 충분한 참조 청크가 발견되지 않았습니다. (일반 지능 답변 수행)*\n"
         
     yield format_stream_chunk(log_chunk_detail + ">\n", selected_model)
     await asyncio.sleep(0.01)
     
-    # 4단계: 제미나이 최종 답안 작성 구간
+    # 4단계: 제미나이 최종 답안 작성 구간 (모델별 커스텀 프롬프트 동적 반영)
     t_start = time.time()
     yield format_stream_chunk("> ✍️ *최종 지식 융합 및 답변 구성 중...*\n\n---\n\n", selected_model)
     
     joined_context = "\n".join(final_retrieved_contexts) if final_retrieved_contexts else "관련 지식 데이터 없음."
+    
+    # 💡 [핵심 연동] 모델별 프롬프트 매니저를 통해 실시간 설정값 획득
+    custom_model_prompt = get_model_system_instruction(
+        selected_model, 
+        "당신은 사내 통합 지식 보관소 데이터를 바탕으로 답변을 도출하는 팩트 검토 AI 보좌관입니다."
+    )
+
     rag_system_instruction = (
-        f"{user_context_instruction}\n"
-        "당신은 사내 통합 지식 보관소 데이터를 바탕으로 답변을 도출하는 팩트 검토 AI 보좌관입니다.\n"
+        f"{custom_model_prompt}\n\n"
         "아래 제공되는 [참조 지식 컨텍스트]에 명확히 명시된 팩트만을 기반으로 자연스럽고 읽기 쉽게 답변해야 합니다.\n\n"
         "[답변 철칙]\n"
         "1. 본인의 사전 지식을 활용하여 절대 그럴싸한 거짓말이나 없는 문장을 지어내지 마세요.\n"
@@ -331,15 +356,17 @@ async def handle_knowledge_retrieval_stream(user_last_text: str, user_context_in
     
     yield "data: [DONE]\n\n"
 
-# 🎯 OpenWebUI 선택 모델 목록 반환
+# 🎯 [핵심 변경] OpenWebUI 선택 모델 목록 반환 (JSON 설정 동적 연동)
 @app.get("/v1/models")
 def list_models():
+    configs = load_model_configs()
+    model_list = [
+        {"id": model_id, "object": "model", "created": int(time.time()), "owned_by": "redbombz"}
+        for model_id in configs.keys()
+    ]
     return {
         "object": "list",
-        "data": [
-            {"id": "3PL지식저장소", "object": "model", "created": int(time.time()), "owned_by": "redbombz"},
-            {"id": "의약품스마트검색", "object": "model", "created": int(time.time()), "owned_by": "redbombz"}
-        ]
+        "data": model_list
     }
 
 @app.post("/v1/chat/completions")
@@ -349,7 +376,7 @@ async def chat_completions(request: Request):
     user_id = request.headers.get("x-openwebui-user-id", "Unknown_ID")
     user_email = request.headers.get("x-openwebui-user-email", "unknown@company.com")
 
-    base_url = os.getenv("BASE_URL", "https://aimeow.duckdns.org:20443")
+    base_url = os.getenv("RAG_BASE_URL", "https://aimeow.duckdns.org:8000")
     start_time = time.time()            
     kst = pytz.timezone('Asia/Seoul')
     current_time_str = datetime.now(kst).strftime("%Y년 %m월 %d일 %A %H시 %M분 %S초")
@@ -373,12 +400,9 @@ async def chat_completions(request: Request):
             "choices": [{"index": 0, "message": {"role": "assistant", "content": title_response.text if title_response.text else "추출 실패"}, "finish_reason": "stop"}]
         }
     
-    user_context_instruction = f"현재 대화 중인 사용자의 이름은 '{user_name}'이고, 이메일은 '{user_email}'입니다. 기준 시간은 '{current_time_str}'입니다. "
-
     return StreamingResponse(
         handle_knowledge_retrieval_stream(
             user_last_text=user_last_text,
-            user_context_instruction=user_context_instruction,
             openai_messages=openai_messages,
             selected_model=selected_model,
             base_url=base_url,
@@ -387,5 +411,33 @@ async def chat_completions(request: Request):
         media_type="text/event-stream"
     )
 
+def run_tkinter_gui():
+    """Tkinter 설정 UI를 별도 스레드에서 실행"""
+    from config_ui_app import AdvancedConfigApp
+    
+    root = tk.Tk()
+    app = AdvancedConfigApp(root)
+    
+    # 💡 [핵심] 설정 창이 닫힐 때 전체 프로세스(FastAPI 포함) 강제 종료
+    def on_closing():
+        if messagebox.askokcancel("종료", "RAG 설정 관리 창을 닫으시겠습니까?\n(백엔드 서버도 함께 종료됩니다.)"):
+            root.destroy()
+            os._exit(0) # 백그라운드 Uvicorn 서버 및 콘솔 프로세스 즉시 종료
+
+    root.protocol("WM_DELETE_WINDOW", on_closing)
+    root.mainloop()
+
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    # 1. Tkinter 설정 UI를 백그라운드 스레드로 실행
+    ui_thread = threading.Thread(target=run_tkinter_gui, daemon=True)
+    ui_thread.start()
+    print("🖥️ [설정 UI] 데스크톱 관리 창 가동 완료")
+
+    # 2. FastAPI (Uvicorn) 메인 서버 실행
+    print("🚀 [3PL RAG 서버] 지식 검색 백엔드 가동 시작 (포트: 8000)")
+    uvicorn.run(
+        "main:app", 
+        host="0.0.0.0", 
+        port=8000, 
+        reload=False
+    )
