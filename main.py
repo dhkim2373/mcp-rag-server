@@ -184,10 +184,11 @@ async def step_vector_search(sub_queries: list, selected_model: str, vector_sear
     return sub_query_chunks
 
 
-def step_rerank_and_filter(sub_queries: list, sub_query_chunks: dict, use_rerank: bool, similarity_threshold: float):
+def step_rerank_and_filter(sub_queries: list, sub_query_chunks: dict, use_rerank: bool, similarity_threshold: float, max_target_chunks: int):
     final_retrieved_contexts = []
     selected_chunk_objects = []
-    MAX_TARGET_CHUNKS = max(5, len(sub_queries))
+    # 💡 설정값(max_target_chunks) 반영
+    MAX_TARGET_CHUNKS = max(max_target_chunks, len(sub_queries))
     
     try:
         if use_rerank:
@@ -315,11 +316,12 @@ async def handle_knowledge_retrieval_stream(
     use_query_splitting: bool = True,
     vector_search_limit: int = 10,
     similarity_threshold: float = 0.35,
-    use_rerank: bool = True
+    use_rerank: bool = True,
+    max_target_chunks: int = 5
 ):
     print("\n" + "="*60)
     print(f"📥 [RAG 파이프라인 가동] 대상 모델: \"{selected_model}\" | 유저 질문: \"{user_last_text}\"")
-    print(f"🎛️ [옵션 상태] 의도분할: {use_query_splitting} | 수집한도: {vector_search_limit} | 유사도컷라인: {similarity_threshold} | 리랭커: {use_rerank}")
+    print(f"🎛️ [옵션 상태] 의도분할: {use_query_splitting} | 수집한도: {vector_search_limit} | 유사도컷라인: {similarity_threshold} | 리랭커: {use_rerank} | 통과상한: {max_target_chunks}")
     print("-"*60)
 
     yield format_stream_chunk("> 🛠️ **[RAG 시스템 파이프라인 가동 분석]**\n>\n", selected_model)
@@ -349,7 +351,7 @@ async def handle_knowledge_retrieval_stream(
     # 3단계 실행: 리랭크 및 필터링
     t_start = time.time()
     final_contexts, selected_chunks, status_msg = step_rerank_and_filter(
-        sub_queries, sub_query_chunks, use_rerank, similarity_threshold
+        sub_queries, sub_query_chunks, use_rerank, similarity_threshold, max_target_chunks
     )
     dt_rerank = time.time() - t_start
     
@@ -429,6 +431,12 @@ async def chat_completions(request: Request):
     # 사용자 컨텍스트 문구 생성
     user_context_instruction = f"현재 대화 중인 사용자의 이름은 '{user_name}'이고, 이메일은 '{user_email}'입니다. 기준 시간은 '{current_time_str}'입니다. "
 
+    # 💡 [동적 설정 반영] .env 환경 변수에서 RAG 제어 파라미터 로드
+    vector_search_limit = int(os.getenv("VECTOR_SEARCH_LIMIT", 10))
+    similarity_threshold = float(os.getenv("SIMILARITY_THRESHOLD", 0.35))
+    use_rerank = os.getenv("USE_RERANK", "True").lower() in ("true", "1", "yes")
+    max_target_chunks = int(os.getenv("MAX_TARGET_CHUNKS", 5))
+
     return StreamingResponse(
         handle_knowledge_retrieval_stream(
             user_last_text=user_last_text,
@@ -438,9 +446,10 @@ async def chat_completions(request: Request):
             base_url=base_url,
             start_time=start_time,
             use_query_splitting=True,      
-            vector_search_limit=10,         
-            similarity_threshold=0.35,      
-            use_rerank=True                 
+            vector_search_limit=vector_search_limit,         
+            similarity_threshold=similarity_threshold,      
+            use_rerank=use_rerank,
+            max_target_chunks=max_target_chunks
         ),
         media_type="text/event-stream"
     )

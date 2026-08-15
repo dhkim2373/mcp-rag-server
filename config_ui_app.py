@@ -15,17 +15,32 @@ except Exception:
 ENV_FILE_PATH = ".env"
 load_dotenv(ENV_FILE_PATH, override=True)
 
-# 그룹별 키 정의 (💡 QUERY_SPLIT_MODEL 추가)
-ENV_KEYS = ["RAG_BASE_URL", "GEMINI_API_KEY", "OLLAMA_BASE_URL", "EMBEDDING_MODEL", "QUERY_SPLIT_MODEL"]
+# 그룹별 키 정의 (💡 RAG 하이퍼파라미터 키 추가)
+ENV_KEYS = [
+    "RAG_BASE_URL", 
+    "GEMINI_API_KEY", 
+    "OLLAMA_BASE_URL", 
+    "EMBEDDING_MODEL", 
+    "QUERY_SPLIT_MODEL",
+    "VECTOR_SEARCH_LIMIT",
+    "SIMILARITY_THRESHOLD",
+    "USE_RERANK",
+    "MAX_TARGET_CHUNKS"
+]
+
 DB_KEYS = ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"]
 
-# 항목별 상세 설명 딕셔너리 (💡 의도 분할 모델 설명 추가)
+# 항목별 상세 설명 딕셔너리
 DESCRIPTIONS = {
     "RAG_BASE_URL": "• 서비스 대표 도메인 또는 백엔드 URL 주소",
     "GEMINI_API_KEY": "• 최종 답변을 위한 구글 제미나이 API 인증 키",
     "OLLAMA_BASE_URL": "• 로컬 Ollama AI 서버 주소",
     "EMBEDDING_MODEL": "• 텍스트 벡터 임베딩 모델 명칭 (예: bge-m3)",
-    "QUERY_SPLIT_MODEL": "• 질문 의도 분할 및 정제에 사용할 Ollama LLM 모델 명칭 (예: exaone3.5:7.8b)",
+    "QUERY_SPLIT_MODEL": "• 질문 의도 분할 및 정제에 사용할 Ollama LLM 모델 명칭",
+    "VECTOR_SEARCH_LIMIT": "• 벡터 DB에서 1차로 수집할 후보 청크 개수 (기본: 10)",
+    "SIMILARITY_THRESHOLD": "• 반영할 최소 벡터 유사도 컷라인 (예: 0.35)",
+    "USE_RERANK": "• 크로스 인코더 리랭커 사용 여부 (True 또는 False)",
+    "MAX_TARGET_CHUNKS": "• 리랭크를 통과하여 최종 LLM에 전달할 최대 청크 개수 (기본: 5)",
     "DB_HOST": "• PostgreSQL DB 호스트 주소 (예: localhost)",
     "DB_PORT": "• PostgreSQL 포트 번호 (기본: 5432)",
     "DB_NAME": "• PostgreSQL 데이터베이스 이름",
@@ -37,7 +52,7 @@ class AdvancedConfigApp:
     def __init__(self, root):
         self.root = root
         self.root.title("⚙️ RAG 시스템 종합 설정 관리")
-        self.root.geometry("700x850")
+        self.root.geometry("720x880")
         self.root.resizable(False, False)
         self.root.configure(bg="#f8f9fa")
 
@@ -59,8 +74,8 @@ class AdvancedConfigApp:
         self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
         # 탭 추가
-        self.create_tab(" 🌍 기본 환경 ", ENV_KEYS)
-        self.create_tab(" 🗄️ 데이터베이스(DB) ", DB_KEYS)
+        self.create_scrollable_tab(" 🌍 기본 환경 및 RAG 제어 ", ENV_KEYS)
+        self.create_scrollable_tab(" 🗄️ 데이터베이스(DB) ", DB_KEYS)
         
         self.tab_models = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_models, text=" 🤖 모델 & 프롬프트 ")
@@ -72,35 +87,42 @@ class AdvancedConfigApp:
                              command=self.save_all_configs)
         save_btn.pack(fill="x", padx=10, pady=10, ipady=8)
 
-    def create_tab(self, name, keys):
+    def create_scrollable_tab(self, name, keys):
         frame = ttk.Frame(self.notebook)
         self.notebook.add(frame, text=name)
         
-        container = tk.Frame(frame, bg="#ffffff", padx=20, pady=15)
-        container.pack(fill="both", expand=True)
+        canvas = tk.Canvas(frame, borderwidth=0, highlightthickness=0, bg="#ffffff")
+        scroll_frame = tk.Frame(canvas, bg="#ffffff", padx=15, pady=10)
+        vsbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsbar.set)
+
+        vsbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        scroll_frame.bind("<Configure>", lambda event, c=canvas: c.configure(scrollregion=c.bbox("all")))
 
         for key in keys:
-            row = tk.Frame(container, bg="#ffffff", pady=4)
+            row = tk.Frame(scroll_frame, bg="#ffffff", pady=4)
             row.pack(fill="x")
             
             top_sub = tk.Frame(row, bg="#ffffff")
             top_sub.pack(fill="x")
 
-            lbl = tk.Label(top_sub, text=key, width=18, anchor="w", font=self.font_bold, fg="#212529", bg="#ffffff")
+            lbl = tk.Label(top_sub, text=key, width=22, anchor="w", font=self.font_bold, fg="#212529", bg="#ffffff")
             lbl.pack(side="left")
             
-            entry = tk.Entry(top_sub, width=44, font=self.font_regular, fg="#212529", bg="#fdfdfe", relief="solid", bd=1)
+            entry = tk.Entry(top_sub, width=38, font=self.font_regular, fg="#212529", bg="#fdfdfe", relief="solid", bd=1)
             entry.insert(0, os.getenv(key, ""))
             entry.pack(side="right", ipady=3)
             self.entries[key] = entry
             
             bot_sub = tk.Frame(row, bg="#ffffff")
-            bot_sub.pack(fill="x", padx=(18, 0), pady=(2, 0))
+            bot_sub.pack(fill="x", padx=(22, 0), pady=(2, 0))
             
             desc_lbl = tk.Label(bot_sub, text=DESCRIPTIONS.get(key, ""), anchor="w", font=self.font_small, fg="#6c757d", bg="#ffffff")
             desc_lbl.pack(side="left")
 
-            tk.Frame(container, height=1, bg="#e9ecef").pack(fill="x", pady=6)
+            tk.Frame(scroll_frame, height=1, bg="#e9ecef").pack(fill="x", pady=6)
 
     def create_models_tab(self, parent):
         main = tk.Frame(parent, bg="#ffffff", padx=15, pady=15)
@@ -206,7 +228,7 @@ class AdvancedConfigApp:
                 self.model_configs[current_model] = current_prompt
 
             save_model_configs(self.model_configs)
-            messagebox.showinfo("성공", "✅ 모든 환경 설정과 모델별 프롬프트가 성공적으로 저장되었습니다!")
+            messagebox.showinfo("성공", "✅ 모든 환경 설정과 RAG 파라미터가 성공적으로 저장되었습니다!")
         except Exception as e:
             messagebox.showerror("에러", f"설정 저장 실패:\n{str(e)}")
 
