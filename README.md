@@ -1,4 +1,3 @@
-```markdown
 # 🚀 3PL RAG Server (Enterprise Retrieval-Augmented Generation System)
 
 사내 통합 지식 보관소 및 3PL(3자 물류) 도메인에 특화된 고성능 **RAG(Retrieval-Augmented Generation) 백엔드 서버**입니다. 로컬 Ollama 모델과 외부 LLM(Gemini)을 하이브리드 형태로 연동하고, OpenWebUI 표준 규격과 완벽하게 호환됩니다.
