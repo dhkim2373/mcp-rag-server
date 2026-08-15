@@ -1,7 +1,3 @@
-지금까지 구축하신 **3PL RAG Server** 프로젝트의 구조와 기능(의도 분할, 벡터 검색, 리랭커, 커넥션 풀, 핫스왑, Tkinter 설정 UI)을 완벽하게 담아낸 상세하고 전문적인 `README.md` 문서입니다.
-
----
-
 ```markdown
 # 🚀 3PL RAG Server (Enterprise Retrieval-Augmented Generation System)
 
