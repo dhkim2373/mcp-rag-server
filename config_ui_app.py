@@ -1,5 +1,6 @@
 import os
 import json
+import urllib.request
 import tkinter as tk
 from tkinter import ttk, messagebox
 from dotenv import load_dotenv, set_key
@@ -15,7 +16,7 @@ except Exception:
 ENV_FILE_PATH = ".env"
 load_dotenv(ENV_FILE_PATH, override=True)
 
-# 그룹별 키 정의 (💡 RAG 하이퍼파라미터 키 추가)
+# 그룹별 키 정의 (RAG 하이퍼파라미터 포함)
 ENV_KEYS = [
     "RAG_BASE_URL", 
     "GEMINI_API_KEY", 
@@ -228,7 +229,16 @@ class AdvancedConfigApp:
                 self.model_configs[current_model] = current_prompt
 
             save_model_configs(self.model_configs)
-            messagebox.showinfo("성공", "✅ 모든 환경 설정과 RAG 파라미터가 성공적으로 저장되었습니다!")
+
+            # 💡 [핵심 추가] 백엔드 서버에 핫스왑 리로드 요청 전송
+            try:
+                req = urllib.request.Request("http://localhost:8000/reload-config", method="POST")
+                with urllib.request.urlopen(req, timeout=3) as response:
+                    print("🔄 백엔드 핫스왑 동기화 완료:", response.read().decode())
+            except Exception as net_err:
+                print(f"⚠️ 백엔드 서버 통신 실패 (서버 미구동 상태일 수 있음): {net_err}")
+
+            messagebox.showinfo("성공", "✅ 모든 환경 설정과 RAG 파라미터가 성공적으로 저장 및 실시간 반영되었습니다!")
         except Exception as e:
             messagebox.showerror("에러", f"설정 저장 실패:\n{str(e)}")
 

@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 
 import pytz
 import psycopg
+from psycopg_pool import ConnectionPool
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
@@ -36,13 +37,41 @@ from routers import knowledge
 # 🛠️ 모델 ID 및 프롬프트 관리 동적 모듈 불러오기
 from model_config_manager import load_model_configs, get_model_system_instruction
 
+# 전역 DB 커넥션 풀 및 AI 엔진 변수 선언
+db_pool: ConnectionPool = None
+local_llm = None
+embeddings_engine = None
+
+def init_ai_engines():
+    """AI 엔진들을 현재 설정된 환경 변수 기준으로 초기화/재바인딩"""
+    global local_llm, embeddings_engine
+    ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    split_model = os.getenv("QUERY_SPLIT_MODEL", "exaone3.5:7.8b")
+    embed_model = os.getenv("EMBEDDING_MODEL", "bge-m3")
+    
+    print(f"⚙️ [AI 엔진 바인딩] 의도분할 모델({split_model}) 및 임베딩 모델({embed_model}) 설정 적용 중...")
+    local_llm = ChatOllama(base_url=ollama_url, model=split_model, temperature=0)
+    embeddings_engine = OllamaEmbeddings(base_url=ollama_url, model=embed_model)
+
 # ==========================================================
-# ⏱️ [FastAPI 통합 Lifespan]
+# ⏱️ [FastAPI 통합 Lifespan 및 커넥션 풀 초기화]
 # ==========================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🚀 [3PL RAG 서버] 가동 시작 및 리소스 초기화 완료 (모델 설정 동기화 활성화)")
+    global db_pool
+    print("🚀 [3PL RAG 서버] 가동 시작 및 리소스 초기화 완료 (핫스왑 동기화 활성화)")
+    
+    conninfo = f"host={os.getenv('DB_HOST', 'localhost')} dbname={os.getenv('DB_NAME', '')} user={os.getenv('DB_USER', '')} password={os.getenv('DB_PASSWORD', '')} port={os.getenv('DB_PORT', 5432)}"
+    db_pool = ConnectionPool(conninfo=conninfo, min_size=2, max_size=10)
+    print("🗄️ [DB Pool 초기화] PostgreSQL 커넥션 풀 생성 완료")
+    
+    # 초기 AI 엔진 바인딩
+    init_ai_engines()
+    
     yield
+    
+    if db_pool:
+        db_pool.close()
     print("🛑 [3PL RAG 서버] 안전 종료 중...")
 
 app = FastAPI(title="3PL RAG Server", lifespan=lifespan)
@@ -51,43 +80,25 @@ app = FastAPI(title="3PL RAG Server", lifespan=lifespan)
 app.include_router(knowledge.router)
 
 # ==========================================================
-# 🛡️ [CORS 미들웨어 추가]: UI 깜빡임 및 API 통신 오류 방지
+# 🛡️ [CORS 미들웨어 추가]
 # ==========================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 필요에 따라 특정 도메인으로 제한 가능
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 구글 제미나이 API 클라이언트 선언 (환경변수 적용)
+# 구글 제미나이 API 클라이언트 선언
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", os.getenv("GCP_API_KEY"))
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# DB 연결 정보 (환경변수 기본값 적용)
-MY_DATABASE_INFO = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "dbname": os.getenv("DB_NAME", ""),
-    "user": os.getenv("DB_USER", ""),
-    "password": os.getenv("DB_PASSWORD", ""),
-    "port": int(os.getenv("DB_PORT", 5432))
-}
-
-# 🎯 [동적 설정 연동] 의도분할 LLM 및 임베딩 엔진 모델명 환경변수 매핑
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-QUERY_SPLIT_MODEL = os.getenv("QUERY_SPLIT_MODEL", "exaone3.5:7.8b")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
-
-print(f"⚙️ [로컬 백엔드 최적화] 의도분할 모델({QUERY_SPLIT_MODEL}) 및 임베딩 모델({EMBEDDING_MODEL}) 로드 중...")
-local_llm = ChatOllama(base_url=OLLAMA_BASE_URL, model=QUERY_SPLIT_MODEL, temperature=0)
-embeddings_engine = OllamaEmbeddings(base_url=OLLAMA_BASE_URL, model=EMBEDDING_MODEL)
-
-# 🎯 [리랭커]: 가볍고 빠른 base 모델 유지
+# 🎯 [리랭커]
 print("⚙️ [Reranker 초기화] BAAI/bge-reranker-base 엔진 바인딩 중...")
 reranker_engine = CrossEncoder("BAAI/bge-reranker-base", max_length=512)
 
-# 🎯 [의도 분할 프롬프트]: 무조건 한글로 분할/정제되도록 강제
+# 🎯 [의도 분할 프롬프트]
 query_splitter_prompt = ChatPromptTemplate.from_messages([
     ("system", """당신은 입력된 질문을 지식 검색에 용이한 독립된 검색어(질문)로 분할하는 엔진입니다.
 
@@ -100,11 +111,7 @@ query_splitter_prompt = ChatPromptTemplate.from_messages([
     ("user", "분석할 사용자 질문:\n\n{user_query}")
 ])
 
-# ==========================================================
-# 🛠️ 스트리밍 전용 패킷 포맷터 헬퍼 함수
-# ==========================================================
 def format_stream_chunk(text: str, model_name: str) -> str:
-    """OpenWebUI 표준 OpenAI 스트리밍 JSON 델타 포맷 데이터 변환"""
     chunk = {
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion.chunk",
@@ -117,6 +124,22 @@ def format_stream_chunk(text: str, model_name: str) -> str:
         }]
     }
     return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+# ==========================================================
+# 🔄 [핫스왑 엔드포인트] 설정 변경 실시간 반영 API
+# ==========================================================
+@app.post("/reload-config")
+async def reload_config_api():
+    try:
+        # .env 파일 최신 내용 메모리에 다시 로드
+        load_dotenv(override=True)
+        # AI 엔진 재바인딩 (모델명 변경 대응)
+        init_ai_engines()
+        print("🔄 [핫스왑 성공] 변경된 환경 설정 및 AI 모델이 실시간으로 반영되었습니다.")
+        return {"status": "success", "message": "설정이 실시간으로 핫스왑되었습니다."}
+    except Exception as e:
+        print(f"❌ [핫스왑 실패] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==========================================================
 # 🛠️ 비동기 RAG 파이프라인 Generator (단계별 함수 분할)
@@ -144,9 +167,10 @@ async def step_vector_search(sub_queries: list, selected_model: str, vector_sear
     seen_chunk_ids = set()
     
     def db_query_task():
-        conn = None
-        try:
-            conn = psycopg.connect(**MY_DATABASE_INFO)
+        if not db_pool:
+            raise RuntimeError("데이터베이스 커넥션 풀이 초기화되지 않았습니다.")
+            
+        with db_pool.connection() as conn:
             with conn.cursor() as cur:
                 for sub_q in sub_queries:
                     q_vector = embeddings_engine.embed_query(sub_q.strip())
@@ -174,20 +198,18 @@ async def step_vector_search(sub_queries: list, selected_model: str, vector_sear
                             "date_str": date_str,
                             "vector_similarity": float(sim_score)
                         })
-        except Exception as db_err:
-            print(f"❌ 벡터 DB 탐색 실패: {db_err}")
-        finally:
-            if conn:
-                conn.close()
 
-    await asyncio.to_thread(db_query_task)
+    try:
+        await asyncio.to_thread(db_query_task)
+    except Exception as db_err:
+        print(f"❌ 벡터 DB 탐색 실패: {db_err}")
+        
     return sub_query_chunks
 
 
-def step_rerank_and_filter(sub_queries: list, sub_query_chunks: dict, use_rerank: bool, similarity_threshold: float, max_target_chunks: int):
+async def step_rerank_and_filter(sub_queries: list, sub_query_chunks: dict, use_rerank: bool, similarity_threshold: float, max_target_chunks: int):
     final_retrieved_contexts = []
     selected_chunk_objects = []
-    # 💡 설정값(max_target_chunks) 반영
     MAX_TARGET_CHUNKS = max(max_target_chunks, len(sub_queries))
     
     try:
@@ -196,7 +218,8 @@ def step_rerank_and_filter(sub_queries: list, sub_query_chunks: dict, use_rerank
                 if not chunks:
                     continue
                 rerank_pairs = [[sub_q, chunk["content"]] for chunk in chunks]
-                scores = reranker_engine.predict(rerank_pairs)
+                scores = await asyncio.to_thread(reranker_engine.predict, rerank_pairs)
+                
                 for idx, raw_score in enumerate(scores):
                     chunks[idx]["rerank_score"] = float(raw_score)
                 chunks.sort(key=lambda x: x["rerank_score"], reverse=True)
@@ -350,7 +373,7 @@ async def handle_knowledge_retrieval_stream(
 
     # 3단계 실행: 리랭크 및 필터링
     t_start = time.time()
-    final_contexts, selected_chunks, status_msg = step_rerank_and_filter(
+    final_contexts, selected_chunks, status_msg = await step_rerank_and_filter(
         sub_queries, sub_query_chunks, use_rerank, similarity_threshold, max_target_chunks
     )
     dt_rerank = time.time() - t_start
@@ -384,7 +407,6 @@ async def handle_knowledge_retrieval_stream(
     
     yield "data: [DONE]\n\n"
 
-# 🎯 OpenWebUI 선택 모델 목록 반환
 @app.get("/v1/models")
 def list_models():
     configs = load_model_configs()
@@ -428,10 +450,9 @@ async def chat_completions(request: Request):
             "choices": [{"index": 0, "message": {"role": "assistant", "content": title_response.text if title_response.text else "추출 실패"}, "finish_reason": "stop"}]
         }
     
-    # 사용자 컨텍스트 문구 생성
     user_context_instruction = f"현재 대화 중인 사용자의 이름은 '{user_name}'이고, 이메일은 '{user_email}'입니다. 기준 시간은 '{current_time_str}'입니다. "
 
-    # 💡 [동적 설정 반영] .env 환경 변수에서 RAG 제어 파라미터 로드
+    # 💡 [동적 런타임 로드] 요청마다 최신 환경 변수 값을 읽어옴 (핫스왑 대응)
     vector_search_limit = int(os.getenv("VECTOR_SEARCH_LIMIT", 10))
     similarity_threshold = float(os.getenv("SIMILARITY_THRESHOLD", 0.35))
     use_rerank = os.getenv("USE_RERANK", "True").lower() in ("true", "1", "yes")
@@ -455,7 +476,6 @@ async def chat_completions(request: Request):
     )
 
 def run_tkinter_gui():
-    """Tkinter 설정 UI를 별도 스레드에서 실행"""
     from config_ui_app import AdvancedConfigApp
     
     root = tk.Tk()
