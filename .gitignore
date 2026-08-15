@@ -1,6 +1,8 @@
 # Environment variables
 .env
 .env.local
+model_prompts.json
 /samples
+/aimeow.duckdns.org
 *.pyc
 readme.txt
