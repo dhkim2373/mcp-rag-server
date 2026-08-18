@@ -6,6 +6,10 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 import psycopg
 from langchain_ollama import OllamaEmbeddings
+from dotenv import load_dotenv
+
+# 🎯 .env 파일 로드
+load_dotenv()
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 template_path = os.path.join(os.path.dirname(current_dir), "templates")
@@ -16,15 +20,20 @@ router = APIRouter(
     tags=["knowledge-admin"]
 )
 
+# 🎯 환경변수로부터 DB 접속 정보 로드 (없을 경우 기존 기본값 대체)
 MY_DATABASE_INFO = {
-    "host": "localhost",
-    "dbname": "redbombz",
-    "user": "redbombz",
-    "password": "a11223344*",
-    "port": 5432
+    "host": os.getenv("DB_HOST", "localhost"),
+    "dbname": os.getenv("DB_NAME", ""),
+    "user": os.getenv("DB_USER", ""),
+    "password": os.getenv("DB_PASSWORD", ""),
+    "port": int(os.getenv("DB_PORT", 5432))
 }
 
-embeddings_engine = OllamaEmbeddings(base_url="http://localhost:11434", model="bge-m3")
+# 🎯 환경변수로부터 Ollama 임베딩 설정 로드
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "bge-m3")
+
+embeddings_engine = OllamaEmbeddings(base_url=OLLAMA_BASE_URL, model=OLLAMA_EMBED_MODEL)
 
 
 # ==========================================================
