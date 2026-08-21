@@ -202,7 +202,7 @@ def webhook_ingest_chunks(payload: WebhookPayload):
         """
         
         for chunk in payload.chunks:
-            chunk_text = re.sub(r'\s+', ' ', chunk.text).strip()
+            chunk_text = re.sub(r'[ \t]+', ' ', chunk.text).strip()
             if not chunk_text:
                 continue
                 

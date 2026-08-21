@@ -210,7 +210,7 @@ async def step_vector_search(sub_queries: list, selected_model: str, vector_sear
 async def step_rerank_and_filter(sub_queries: list, sub_query_chunks: dict, use_rerank: bool, similarity_threshold: float, max_target_chunks: int):
     final_retrieved_contexts = []
     selected_chunk_objects = []
-    MAX_TARGET_CHUNKS = max(max_target_chunks, len(sub_queries))
+    MAX_TARGET_CHUNKS = max(max_target_chunks, len(sub_queries)*2)
     
     try:
         if use_rerank:
@@ -284,7 +284,7 @@ async def step_generate_answer_stream(
     rag_system_instruction = (
         f"{user_context_instruction}\n"
         f"{custom_model_prompt}\n\n"
-        "아래 제공되는 [참조 지식 컨텍스트]에 명확히 명시된 팩트만을 기반으로 자연스럽고 읽기 쉽게 답변해야 합니다.\n\n"
+        "아래 제공되는 [참조 지식 컨텍스트]에 명확히 명시된 팩트만을 기반으로 자연스럽고 읽기 쉽게 답변해야 합니다. 내용 중 이미지가 있다면 적극적으로 보여주도록 합니다.\n\n"
         "[답변 철칙]\n"
         "1. 본인의 사전 지식을 활용하여 절대 그럴싸한 거짓말이나 없는 문장을 지어내지 마세요.\n"
         "2. 🚨 [최신성 우선 원칙] 제공된 컨텍스트 내에서 서로 상충되거나 유사한 내용의 자료가 발견될 경우, 본문에 적힌 [기록일자] 정보를 확인하여 가장 최근(최신)에 기록된 데이터를 우선 참조하세요.\n"
