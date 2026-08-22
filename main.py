@@ -131,9 +131,7 @@ def format_stream_chunk(text: str, model_name: str) -> str:
 @app.post("/reload-config")
 async def reload_config_api():
     try:
-        # .env 파일 최신 내용 메모리에 다시 로드
         load_dotenv(override=True)
-        # AI 엔진 재바인딩 (모델명 변경 대응)
         init_ai_engines()
         print("🔄 [핫스왑 성공] 변경된 환경 설정 및 AI 모델이 실시간으로 반영되었습니다.")
         return {"status": "success", "message": "설정이 실시간으로 핫스왑되었습니다."}
@@ -162,7 +160,7 @@ async def step_split_query(user_last_text: str, use_query_splitting: bool) -> li
     return sub_queries
 
 
-async def step_vector_search(sub_queries: list, selected_model: str, vector_search_limit: int) -> dict:
+async def step_vector_search(sub_queries: list, selected_model: str, vector_search_limit: int, search_mode: str) -> dict:
     sub_query_chunks = {sub_q: [] for sub_q in sub_queries}
     seen_chunk_ids = set()
     
@@ -174,17 +172,40 @@ async def step_vector_search(sub_queries: list, selected_model: str, vector_sear
             with conn.cursor() as cur:
                 for sub_q in sub_queries:
                     q_vector = embeddings_engine.embed_query(sub_q.strip())
-                    search_query = f"""
-                        SELECT reference_number, content, (1 - (embedding <=> %s::vector)) AS similarity, created_at, chunk_id
-                        FROM tb_document_chunk 
-                        WHERE is_deleted = 0 
-                          AND model_id = %s
-                        ORDER BY embedding <=> %s::vector ASC, chunk_id DESC 
-                        LIMIT {vector_search_limit};
-                    """
-                    cur.execute(search_query, (q_vector, selected_model, q_vector))
+                    
+                    if search_mode == "hybrid":
+                        fts_keyword = " & ".join([w for w in sub_q.strip().split() if len(w) > 1])
+                        if not fts_keyword:
+                            fts_keyword = sub_q.strip()
+
+                        search_query = f"""
+                            SELECT reference_number, content, 
+                                   (1 - (embedding <=> %s::vector)) AS similarity, 
+                                   created_at, chunk_id,
+                                   ts_rank(content_vector, to_tsquery('simple', %s)) AS fts_rank
+                            FROM tb_document_chunk 
+                            WHERE is_deleted = 0 
+                              AND model_id = %s
+                            ORDER BY (1 - (embedding <=> %s::vector)) * 0.7 + ts_rank(content_vector, to_tsquery('simple', %s)) * 0.3 DESC, chunk_id DESC 
+                            LIMIT {vector_search_limit};
+                        """
+                        cur.execute(search_query, (q_vector, fts_keyword, selected_model, q_vector, fts_keyword))
+                    else:
+                        search_query = f"""
+                            SELECT reference_number, content, 
+                                   (1 - (embedding <=> %s::vector)) AS similarity, 
+                                   created_at, chunk_id,
+                                   0.0 AS fts_rank
+                            FROM tb_document_chunk 
+                            WHERE is_deleted = 0 
+                              AND model_id = %s
+                            ORDER BY embedding <=> %s::vector ASC, chunk_id DESC 
+                            LIMIT {vector_search_limit};
+                        """
+                        cur.execute(search_query, (q_vector, selected_model, q_vector))
+
                     for res in cur.fetchall():
-                        ref_num, content_text, sim_score, created_at, chunk_id = res
+                        ref_num, content_text, sim_score, created_at, chunk_id, fts_score = res
                         if chunk_id in seen_chunk_ids:
                             continue
                         seen_chunk_ids.add(chunk_id)
@@ -196,13 +217,14 @@ async def step_vector_search(sub_queries: list, selected_model: str, vector_sear
                             "ref_num": ref_num,
                             "content": content_text,
                             "date_str": date_str,
-                            "vector_similarity": float(sim_score)
+                            "vector_similarity": float(sim_score),
+                            "fts_rank": float(fts_score)
                         })
 
     try:
         await asyncio.to_thread(db_query_task)
     except Exception as db_err:
-        print(f"❌ 벡터 DB 탐색 실패: {db_err}")
+        print(f"❌ 데이터베이스 검색 실패: {db_err}")
         
     return sub_query_chunks
 
@@ -212,54 +234,41 @@ async def step_rerank_and_filter(sub_queries: list, sub_query_chunks: dict, use_
     selected_chunk_objects = []
     MAX_TARGET_CHUNKS = max(max_target_chunks, len(sub_queries)*2)
     
+    # 1. [1단계 필터] 컷라인을 통과한 데이터만 후보군으로 구성
+    candidate_pool = []
+    for chunks in sub_query_chunks.values():
+        for chunk in chunks:
+            if chunk.get("vector_similarity", 0.0) >= similarity_threshold:
+                candidate_pool.append(chunk)
+
     try:
-        if use_rerank:
-            for sub_q, chunks in sub_query_chunks.items():
-                if not chunks:
-                    continue
-                rerank_pairs = [[sub_q, chunk["content"]] for chunk in chunks]
-                scores = await asyncio.to_thread(reranker_engine.predict, rerank_pairs)
-                
-                for idx, raw_score in enumerate(scores):
-                    chunks[idx]["rerank_score"] = float(raw_score)
-                chunks.sort(key=lambda x: x["rerank_score"], reverse=True)
-                
-            merged_chunks = []
-            max_pool_depth = max(len(chunks) for chunks in sub_query_chunks.values()) if sub_query_chunks else 0
-            for depth in range(max_pool_depth):
-                for sub_q in sub_queries:
-                    pool = sub_query_chunks[sub_q]
-                    if depth < len(pool):
-                        merged_chunks.append(pool[depth])
-                        if len(merged_chunks) >= MAX_TARGET_CHUNKS:
-                            break
-                if len(merged_chunks) >= MAX_TARGET_CHUNKS:
-                    break
-            target_pool = merged_chunks
+        if use_rerank and candidate_pool:
+            # 2. [2단계 리랭크] 통과한 후보들만 리랭크 수행
+            rerank_pairs = [[sub_queries[0], chunk["content"]] for chunk in candidate_pool]
+            scores = await asyncio.to_thread(reranker_engine.predict, rerank_pairs)
+            
+            for idx, score in enumerate(scores):
+                candidate_pool[idx]["rerank_score"] = float(score)
+            
+            candidate_pool.sort(key=lambda x: x["rerank_score"], reverse=True)
             status_msg = "크로스리랭크 완료 (활성화)"
         else:
-            flat_chunks = []
-            for chunks in sub_query_chunks.values():
-                flat_chunks.extend(chunks)
-            flat_chunks.sort(key=lambda x: x["vector_similarity"], reverse=True)
-            target_pool = flat_chunks[:MAX_TARGET_CHUNKS]
+            candidate_pool.sort(key=lambda x: x["vector_similarity"], reverse=True)
             status_msg = "리랭크 생략 (비활성화 - 유사도순)"
 
-        for target in target_pool:
+        # 3. [최종 선정] 리랭크 결과 상위 항목만 선정
+        selected_chunk_objects = candidate_pool[:MAX_TARGET_CHUNKS]
+        
+        for target in selected_chunk_objects:
             vec_sim = target.get("vector_similarity", 0.0)
-            if vec_sim < similarity_threshold:
-                continue
             fmt_context = f"[{target['ref_num']}] (기록일자: {target['date_str']}) (벡터유사도: {vec_sim*100:.1f}%) {target['content']}"
             final_retrieved_contexts.append(fmt_context)
-            selected_chunk_objects.append(target)
-                
+            
     except Exception as rerank_err:
         print(f"⚠️ [리랭커 처리 중 예외] 원인: {rerank_err}")
-        for chunks in sub_query_chunks.values():
-            for target in chunks[:MAX_TARGET_CHUNKS]:
-                fmt_context = f"[{target['ref_num']}] (기록일자: {target['date_str']}) {target['content']}"
-                final_retrieved_contexts.append(fmt_context)
-                selected_chunk_objects.append(target)
+        selected_chunk_objects = candidate_pool[:MAX_TARGET_CHUNKS]
+        for target in selected_chunk_objects:
+            final_retrieved_contexts.append(f"[{target['ref_num']}] {target['content']}")
         status_msg = "리랭커 폴백 실행"
 
     return final_retrieved_contexts, selected_chunk_objects, status_msg
@@ -275,6 +284,16 @@ async def step_generate_answer_stream(
     user_context_instruction: str
 ):
     joined_context = "\n".join(final_retrieved_contexts) if final_retrieved_contexts else "관련 지식 데이터 없음."
+
+    all_configs = load_model_configs()
+    model_conf = all_configs.get(selected_model, {})
+    
+    if isinstance(model_conf, dict):
+        model_temperature = float(model_conf.get("temperature", 0.0))
+    else:
+        model_temperature = 0.0
+        
+    print(f"🎛️ [모델별 파라미터 적용] 모델: \"{selected_model}\" | Temperature: {model_temperature}")
     
     custom_model_prompt = get_model_system_instruction(
         selected_model, 
@@ -284,7 +303,6 @@ async def step_generate_answer_stream(
     rag_system_instruction = (
         f"{user_context_instruction}\n"
         f"{custom_model_prompt}\n\n"
-        "아래 제공되는 [참조 지식 컨텍스트]에 명확히 명시된 팩트만을 기반으로 자연스럽고 읽기 쉽게 답변해야 합니다. 내용 중 이미지가 있다면 적극적으로 보여주도록 합니다.\n\n"
         "[답변 철칙]\n"
         "1. 본인의 사전 지식을 활용하여 절대 그럴싸한 거짓말이나 없는 문장을 지어내지 마세요.\n"
         "2. 🚨 [최신성 우선 원칙] 제공된 컨텍스트 내에서 서로 상충되거나 유사한 내용의 자료가 발견될 경우, 본문에 적힌 [기록일자] 정보를 확인하여 가장 최근(최신)에 기록된 데이터를 우선 참조하세요.\n"
@@ -298,7 +316,6 @@ async def step_generate_answer_stream(
         "---\n"
         "📌 [참조 출처 안내]\n"
         f"- 🔗 [[USER_MEM_95]]({base_url}/view/document/USER_MEM_95?model_id={selected_model}) (기록일자: 2026-07-28)\n\n"
-        "5. 제공된 컨텍스트의 내용만으로 질문에 답할 수 없다면, 근거가 부족하다고 솔직하게 인정하고 답변을 패스하세요.\n\n"
         f"[참조 지식 컨텍스트]\n{joined_context}"
     )
 
@@ -320,7 +337,10 @@ async def step_generate_answer_stream(
         response_stream = client.models.generate_content_stream(
             model="gemini-2.5-flash",
             contents=gemini_contents,
-            config=types.GenerateContentConfig(temperature=0.0, system_instruction=rag_system_instruction)
+            config=types.GenerateContentConfig(
+                temperature=model_temperature, 
+                system_instruction=rag_system_instruction
+            )
         )
         for chunk in response_stream:
             if chunk.text:
@@ -336,18 +356,34 @@ async def handle_knowledge_retrieval_stream(
     selected_model: str, 
     base_url: str, 
     start_time: float,
-    use_query_splitting: bool = True,
-    vector_search_limit: int = 10,
-    similarity_threshold: float = 0.35,
-    use_rerank: bool = True,
-    max_target_chunks: int = 5
+    use_query_splitting: bool,
+    search_mode: str,
+    vector_search_limit: int,
+    similarity_threshold: float,
+    use_rerank: bool,
+    max_target_chunks: int
 ):
     print("\n" + "="*60)
     print(f"📥 [RAG 파이프라인 가동] 대상 모델: \"{selected_model}\" | 유저 질문: \"{user_last_text}\"")
-    print(f"🎛️ [옵션 상태] 의도분할: {use_query_splitting} | 수집한도: {vector_search_limit} | 유사도컷라인: {similarity_threshold} | 리랭커: {use_rerank} | 통과상한: {max_target_chunks}")
+    print(f"🎛️ [파라미터 상태] 검색모드: {search_mode.upper()} | 의도분할: {use_query_splitting} | 수집한도: {vector_search_limit} | 유사도컷라인: {similarity_threshold} | 리랭커: {use_rerank} | 통과상한: {max_target_chunks}")
     print("-"*60)
 
-    yield format_stream_chunk("> 🛠️ **[RAG 시스템 파이프라인 가동 분석]**\n>\n", selected_model)
+    all_configs = load_model_configs()
+    model_conf = all_configs.get(selected_model, {})
+    if isinstance(model_conf, dict):
+        current_temp = float(model_conf.get("temperature", 0.0))
+    else:
+        current_temp = 0.0    
+
+    # 🛠️ 로그 스타일 복구: 설정값 출력
+    mode_display = "하이브리드 검색 (벡터 + 키워드 FTS)" if search_mode == "hybrid" else "벡터 검색 전용 (Dense Vector)"
+    pipeline_status_msg = (
+        f"> 🛠️ **[RAG 시스템 파이프라인 분석]**\n>\n"
+        f"> * 📌 **대상 모델** : `{selected_model}` (검색 모드: `{mode_display}`)\n"
+        f"> * 📌 **검색 파라미터** : 후보 수집 한도 `{vector_search_limit}건` | 유사도 컷라인 `{similarity_threshold}`\n"
+        f"> * 📌 **리랭커/상한 설정** : 크로스 인코더 사용 `{use_rerank}` | 최종 전달 상한 `{max_target_chunks}개`\n>\n"
+    )
+    yield format_stream_chunk(pipeline_status_msg, selected_model)
     await asyncio.sleep(0.01)
 
     # 1단계 실행: 의도 분할
@@ -362,9 +398,9 @@ async def handle_knowledge_retrieval_stream(
     yield format_stream_chunk(log_intent + ">\n", selected_model)
     await asyncio.sleep(0.01)
 
-    # 2단계 실행: 벡터 DB 검색
+    # 2단계 실행: 데이터베이스 검색 (Vector 또는 Hybrid)
     t_start = time.time()
-    sub_query_chunks = await step_vector_search(sub_queries, selected_model, vector_search_limit)
+    sub_query_chunks = await step_vector_search(sub_queries, selected_model, vector_search_limit, search_mode)
     dt_chunk = time.time() - t_start
     total_raw_chunks = sum(len(chunks) for chunks in sub_query_chunks.values())
     
@@ -394,7 +430,7 @@ async def handle_knowledge_retrieval_stream(
     await asyncio.sleep(0.01)
 
     # 4단계 실행: 제미나이 답변 생성 스트리밍
-    yield format_stream_chunk("> ✍️ *최종 지식 융합 및 답변 구성 중...*\n\n---\n\n", selected_model)
+    yield format_stream_chunk(f"> ✍️ *최종 지식 융합 및 답변 구성 중... (Temperature: `{current_temp}`)*\n\n---\n\n", selected_model)
     
     async for chunk_packet in step_generate_answer_stream(
         user_last_text, sub_queries, final_contexts, openai_messages, selected_model, base_url, user_context_instruction
@@ -452,11 +488,22 @@ async def chat_completions(request: Request):
     
     user_context_instruction = f"현재 대화 중인 사용자의 이름은 '{user_name}'이고, 이메일은 '{user_email}'입니다. 기준 시간은 '{current_time_str}'입니다. "
 
-    # 💡 [동적 런타임 로드] 요청마다 최신 환경 변수 값을 읽어옴 (핫스왑 대응)
-    vector_search_limit = int(os.getenv("VECTOR_SEARCH_LIMIT", 10))
-    similarity_threshold = float(os.getenv("SIMILARITY_THRESHOLD", 0.35))
-    use_rerank = os.getenv("USE_RERANK", "True").lower() in ("true", "1", "yes")
-    max_target_chunks = int(os.getenv("MAX_TARGET_CHUNKS", 5))
+    all_configs = load_model_configs()
+    model_conf = all_configs.get(selected_model, {})
+    
+    if isinstance(model_conf, dict):
+        search_mode = str(model_conf.get("search_mode", "vector"))
+        vector_search_limit = int(model_conf.get("vector_search_limit", 10))
+        similarity_threshold = float(model_conf.get("similarity_threshold", 0.35))
+        use_rerank_val = str(model_conf.get("use_rerank", "True"))
+        use_rerank = use_rerank_val.lower() in ("true", "1", "yes")
+        max_target_chunks = int(model_conf.get("max_target_chunks", 5))
+    else:
+        search_mode = "vector"
+        vector_search_limit = int(os.getenv("VECTOR_SEARCH_LIMIT", 10))
+        similarity_threshold = float(os.getenv("SIMILARITY_THRESHOLD", 0.35))
+        use_rerank = os.getenv("USE_RERANK", "True").lower() in ("true", "1", "yes")
+        max_target_chunks = int(os.getenv("MAX_TARGET_CHUNKS", 5))
 
     return StreamingResponse(
         handle_knowledge_retrieval_stream(
@@ -467,8 +514,9 @@ async def chat_completions(request: Request):
             base_url=base_url,
             start_time=start_time,
             use_query_splitting=True,      
+            search_mode=search_mode,
             vector_search_limit=vector_search_limit,         
-            similarity_threshold=similarity_threshold,      
+            similarity_threshold=similarity_threshold,       
             use_rerank=use_rerank,
             max_target_chunks=max_target_chunks
         ),

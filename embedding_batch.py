@@ -80,79 +80,97 @@ class WebhookPayload(BaseModel):
 
 
 # ============================================================
-# 🔄 배치(Batch) 루프 프로세서
+# 🚀 [초고속 튜닝] 대용량 배치(Batch) 루프 프로세서 (한 번에 50개씩 처리)
 # ============================================================
 def process_batch():
-    raw_id = None
+    BATCH_SIZE = 50  # 💡 한 번에 처리할 청크 개수 (GPU 성능에 따라 50~100 조절 가능)
     try:
-        conn = psycopg.connect(**SettingsManager.DB_INFO)
-        cur = conn.cursor()
-        
-        cur.execute("""
-            SELECT raw_id, user_name, content, source_filename, model_id 
-            FROM tb_raw_document 
-            WHERE status = 'READY' 
-            ORDER BY raw_id ASC 
-            LIMIT 1;
-        """)
-        row = cur.fetchone()
-        
-        if not row:
-            cur.close(); conn.close(); return
-            
-        raw_id, user_name, content, source_filename, model_id = row
-        print(f"\n🚀 [배치 엔진] 연산 시작 - Raw ID: {raw_id} | 모델 ID: {model_id} (파일명: {source_filename})")
-        
-        cur.execute("UPDATE tb_raw_document SET status = 'PROCESSING' WHERE raw_id = %s;", (raw_id,))
-        conn.commit()
-        
-        if source_filename and source_filename != 'DIRECT_INPUT':
-            file_match_pattern = f"[{source_filename} | %"
-            purge_old_version_query = """
-                UPDATE tb_document_chunk 
-                SET is_deleted = 1 
-                WHERE content LIKE %s 
-                  AND model_id = %s 
-                  AND is_deleted = 0;
-            """
-            cur.execute(purge_old_version_query, (file_match_pattern, model_id))
-            purg_count = cur.rowcount
-            if purg_count > 0:
-                print(f"   ℹ️ [파일 버전 오버라이드] ({model_id}) 기존 지식 자산 {purg_count}개 조항을 논리 삭제했습니다.")
-        
-        final_content = f"{content.strip()}"
-        data_vector = embeddings_engine.embed_query(final_content)
-        
-        cur.execute("SELECT COALESCE(MAX(chunk_order), 0) + 1 FROM tb_document_chunk;")
-        next_order = cur.fetchone()[0]
-        
-        ref_match = re.search(r'\|\s*REF:(.*?)(?=\])', final_content)
-        if ref_match:
-            ref_tag = ref_match.group(1).strip()
-        else:
-            ref_tag = f"USER_MEM_{next_order}"
-        
-        insert_query = """
-            INSERT INTO tb_document_chunk (chunk_order, reference_number, content, embedding, model_id, is_deleted)
-            VALUES (%s, %s, %s, %s, %s, 0);
-        """
-        cur.execute(insert_query, (next_order, ref_tag, final_content, data_vector, model_id))
-        
-        cur.execute("UPDATE tb_raw_document SET status = 'COMPLETED', processed_at = NOW() WHERE raw_id = %s;", (raw_id,))
-        conn.commit()
-        print(f"  ➔ 🟢 최종 RAG 벡터 공간 이관 성공! (모델: [{model_id}] / 태그: [{ref_tag}])")
-        
-        cur.close(); conn.close()
-    except Exception as e:
-        print(f"  ❌ 배치 파이프라인 에러 발생: {e}")
-        if raw_id:
-            try:
-                conn = psycopg.connect(**SettingsManager.DB_INFO)
-                cur = conn.cursor()
-                cur.execute("UPDATE tb_raw_document SET status = 'ERROR' WHERE raw_id = %s;", (raw_id,))
+        with psycopg.connect(**SettingsManager.DB_INFO) as conn:
+            with conn.cursor() as cur:
+                
+                # 1. READY 상태인 데이터를 지정한 BATCH_SIZE만큼 일괄 가져오기
+                cur.execute("""
+                    SELECT raw_id, user_name, content, source_filename, model_id 
+                    FROM tb_raw_document 
+                    WHERE status = 'READY' 
+                    ORDER BY raw_id ASC 
+                    LIMIT %s;
+                """, (BATCH_SIZE,))
+                rows = cur.fetchall()
+                
+                if not rows:
+                    return
+                
+                raw_ids = [row[0] for row in rows]
+                model_id = rows[0][4]  # 같은 배치 내의 모델 ID 기준
+                
+                print(f"\n🚀 [초고속 배치 엔진] 연산 시작 - 총 {len(rows)}건 일괄 처리 중... (모델 ID: {model_id})")
+                
+                # 2. 상태를 PROCESSING으로 일괄 변경
+                cur.executemany("UPDATE tb_raw_document SET status = 'PROCESSING' WHERE raw_id = %s;", [(rid,) for rid in raw_ids])
                 conn.commit()
-                cur.close(); conn.close()
-            except: pass
+                
+                # 3. 텍스트 추출 및 정제
+                contents = []
+                ref_tags = []
+                
+                # 현재 DB의 다음 chunk_order 미리 조회
+                cur.execute("SELECT COALESCE(MAX(chunk_order), 0) FROM tb_document_chunk;")
+                next_order = cur.fetchone()[0]
+                
+                for idx, row in enumerate(rows):
+                    raw_id, user_name, content, source_filename, m_id = row
+                    final_content = content.strip()
+                    contents.append(final_content)
+                    
+                    ref_match = re.search(r'\|\s*REF:(.*?)(?=\])', final_content)
+                    if ref_match:
+                        ref_tag = ref_match.group(1).strip()
+                    else:
+                        ref_tag = f"USER_MEM_{next_order + idx + 1}"
+                    ref_tags.append(ref_tag)
+
+                # 4. 💡 [핵심] 50개 텍스트를 한 번에(Batch) Ollama로 보내서 초고속 임베딩 연산 수행
+                print(f"   ⚡ Ollama 벡터 임베딩 일괄 생성 요청 중 ({len(contents)}건)...")
+                data_vectors = embeddings_engine.embed_documents(contents)
+                print(f"   ✅ 벡터 임베딩 생성 완료!")
+
+                # 5. DB Bulk Insert 데이터 구성
+                insert_data = []
+                for idx, row in enumerate(rows):
+                    current_order = next_order + idx + 1
+                    insert_data.append((
+                        current_order,
+                        ref_tags[idx],
+                        contents[idx],
+                        data_vectors[idx],
+                        model_id,
+                        0
+                    ))
+
+                insert_query = """
+                    INSERT INTO tb_document_chunk (chunk_order, reference_number, content, embedding, model_id, is_deleted)
+                    VALUES (%s, %s, %s, %s, %s, %s);
+                """
+                cur.executemany(insert_query, insert_data)
+
+                # 6. 원본 문서 상태를 COMPLETED로 일괄 업데이트
+                cur.executemany("UPDATE tb_raw_document SET status = 'COMPLETED', processed_at = NOW() WHERE raw_id = %s;", [(rid,) for rid in raw_ids])
+                conn.commit()
+                
+                print(f"   ➔ 🟢 일괄 RAG 벡터 공간 이관 성공! (총 {len(rows)}건 처리 완료)")
+
+    except Exception as e:
+        print(f"   ❌ 배치 파이프라인 에러 발생: {e}")
+        # 에러 발생 시 현재 배치의 항목들을 ERROR 상태로 안전하게 마킹
+        try:
+            if 'raw_ids' in locals() and raw_ids:
+                with psycopg.connect(**SettingsManager.DB_INFO) as err_conn:
+                    with err_conn.cursor() as err_cur:
+                        err_cur.executemany("UPDATE tb_raw_document SET status = 'ERROR' WHERE raw_id = %s;", [(rid,) for rid in raw_ids])
+                        err_conn.commit()
+        except: 
+            pass
 
 
 # ============================================================
@@ -161,14 +179,16 @@ def process_batch():
 batch_stop_event = asyncio.Event()
 
 async def run_batch_loop():
-    print("⏳ 명시적 REF 추적 및 지식 DB 배치 스케줄러 가동 중...")
+    print("⏳ 초고속 배치 지식 DB 스케줄러 가동 중...")
     while not batch_stop_event.is_set():
         try:
             await asyncio.to_thread(process_batch)
         except Exception as e:
             print(f"   ⚠️ 배치 스케줄러 실행 예외: {e}")
+        
         try:
-            await asyncio.wait_for(batch_stop_event.wait(), timeout=5.0)
+            # 대기 시간을 1초로 줄여서 데이터가 들어오면 즉시 처리되도록 반응성 향상
+            await asyncio.wait_for(batch_stop_event.wait(), timeout=1.0)
         except asyncio.TimeoutError:
             continue
 
@@ -194,28 +214,22 @@ def webhook_ingest_chunks(payload: WebhookPayload):
 
     try:
         conn = psycopg.connect(**SettingsManager.DB_INFO)
-        cursor = conn.cursor()
-        
-        insert_query = """
-            INSERT INTO public.tb_raw_document (user_name, content, status, source_filename, model_id) 
-            VALUES (%s, %s, 'READY', %s, %s);
-        """
-        
-        for chunk in payload.chunks:
-            chunk_text = re.sub(r'[ \t]+', ' ', chunk.text).strip()
-            if not chunk_text:
-                continue
-                
-            cursor.execute(insert_query, (
-                payload.user_name, 
-                chunk_text, 
-                filename_val, 
-                target_model_id
-            ))
-            chunk_count += 1
-        
-        conn.commit()
-        cursor.close()
+        with conn.cursor() as cursor:
+            insert_query = """
+                INSERT INTO public.tb_raw_document (user_name, content, status, source_filename, model_id) 
+                VALUES (%s, %s, 'READY', %s, %s);
+            """
+            
+            bulk_rows = []
+            for chunk in payload.chunks:
+                chunk_text = re.sub(r'[ \t]+', ' ', chunk.text).strip()
+                if not chunk_text:
+                    continue
+                bulk_rows.append((payload.user_name, chunk_text, filename_val, target_model_id))
+                chunk_count += 1
+            
+            cursor.executemany(insert_query, bulk_rows)
+            conn.commit()
     except Exception as e:
         if conn: 
             conn.rollback()
@@ -250,11 +264,9 @@ class ConfigUIApp:
         self.font_regular = ("Malgun Gothic", 9)
         self.font_small = ("Malgun Gothic", 8)
 
-        # 상단 타이틀
         title_label = tk.Label(root, text="RAG 지식 수신 서버 설정 관리", font=self.font_title, fg="#212529", bg="#f8f9fa")
         title_label.pack(pady=(10, 5))
 
-        # ---------------- 💡 전체 영역 스크롤 구현 (Canvas & Scrollbar) ----------------
         container = tk.Frame(root, bg="#f8f9fa")
         container.pack(fill="both", expand=True, padx=10, pady=5)
 
@@ -269,24 +281,17 @@ class ConfigUIApp:
         )
 
         self.canvas_window = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        
-        # 캔버스 너비에 맞게 내부 프레임 크기 조율
         self.canvas.bind('<Configure>', lambda event: self.canvas.itemconfig(self.canvas_window, width=event.width))
-
         self.canvas.configure(yscrollcommand=scrollbar.set)
 
         self.canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        # 마우스 휠 스크롤 연동
         def _on_mousewheel(event):
             self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         
         self.canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
-        # ---------------- 스크롤 프레임 내부 콘텐츠 ----------------
-        
-        # 1. 웹훅 안내 박스
         webhook_frame = tk.LabelFrame(self.scrollable_frame, text=" 🔗 외부 연동 웹훅(Webhook) 안내 ", font=self.font_bold, fg="#0056b3", bg="#ffffff", padx=10, pady=6)
         webhook_frame.pack(fill="x", padx=5, pady=4)
 
@@ -296,7 +301,6 @@ class ConfigUIApp:
         self.webhook_entry.pack(fill="x", pady=(4, 2), ipady=2)
         self.update_webhook_display()
 
-        # 2. DB 테이블 생성가이드
         viewer_frame = tk.LabelFrame(self.scrollable_frame, text=" 📊 PostgreSQL 테이블 생성가이드 ", font=self.font_bold, fg="#d63384", bg="#ffffff", padx=10, pady=6)
         viewer_frame.pack(fill="x", padx=5, pady=4)
 
@@ -313,7 +317,6 @@ class ConfigUIApp:
         open_viewer_btn = tk.Button(viewer_frame, text="🌐 HTML 파일 직접 열기", bg="#d63384", fg="white", activebackground="#b02a6b", activeforeground="white", font=self.font_bold, relief="flat", cursor="hand2", command=open_local_html_viewer)
         open_viewer_btn.pack(fill="x", pady=(4, 2), ipady=2)
 
-        # 3. 환경 변수 입력 폼
         form_outer_frame = tk.LabelFrame(self.scrollable_frame, text=" 🗄️ PostgreSQL DB 및 서비스 환경 변수 설정 ", font=self.font_bold, fg="#198754", bg="#ffffff", padx=10, pady=6)
         form_outer_frame.pack(fill="x", padx=5, pady=4)
 
@@ -351,7 +354,6 @@ class ConfigUIApp:
             desc_lbl = tk.Label(bottom_sub_frame, text=descriptions.get(key, ""), anchor="w", font=self.font_small, fg="#6c757d", bg="#ffffff")
             desc_lbl.pack(side="left", pady=(0, 2))
 
-        # ---------------- 하단: 저장 및 핫스왑 버튼 (스크롤 영역 바깥에 고정) ----------------
         save_btn = tk.Button(root, text="💾 설정 저장 및 핫스왑(실시간 반영)", bg="#0d6efd", fg="white", activebackground="#0b5ed7", activeforeground="white", font=self.font_bold, relief="flat", cursor="hand2", command=self.save_and_reload)
         save_btn.pack(pady=10, ipadx=12, ipady=5)
 
@@ -381,11 +383,10 @@ def run_tkinter_gui():
     root = tk.Tk()
     app = ConfigUIApp(root)
     
-    # 💡 [핵심 추가] 설정 윈도우의 'X' 버튼을 눌러 닫을 때 콘솔(프로세스)까지 함께 종료
     def on_closing():
         if messagebox.askokcancel("종료", "RAG 임베딩 설정 관리 창을 닫으시겠습니까?\n(백엔드 서버도 함께 종료됩니다.)"):
             root.destroy()
-            os._exit(0) # 실행 중인 모든 백그라운드 스레드 및 FastAPI 프로세스를 강제 안전 종료
+            os._exit(0) 
 
     root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()
